@@ -1,0 +1,12 @@
+{
+  "rules": {
+    "no-console": "off",
+    "global-require": "off",
+    "import/no-dynamic-require": "off",
+    "no-unused-vars": "off",
+    "@typescript-eslint/no-unused-vars": "off",
+    "comma-dangle": "off",
+    "end-of-line": "off",
+    "semi": "off"
+  }
+}
