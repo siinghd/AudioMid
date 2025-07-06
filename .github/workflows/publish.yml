@@ -1,47 +1,77 @@
-name: Publish
+name: Release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
-  publish:
-    # To enable auto publishing to github, update your electron publisher
-    # config in package.json > "build" and remove the conditional below
-    if: ${{ github.repository_owner == 'electron-react-boilerplate' }}
-
+  build-and-release:
     runs-on: ${{ matrix.os }}
 
     strategy:
       matrix:
-        os: [macos-latest]
+        os: [macos-14, windows-latest, ubuntu-latest]
 
     steps:
-      - name: Checkout git repo
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Install Node and NPM
-        uses: actions/setup-node@v3
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
+          node-version: 20
+          cache: yarn
 
-      - name: Install and build
+      - name: Install dependencies
         run: |
-          npm install
-          npm run postinstall
-          npm run build
+          corepack enable
+          yarn install --frozen-lockfile
 
-      - name: Publish releases
+      # Build platform-specific artefacts
+      - name: Build application
+        run: |
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            yarn package --mac --publish never
+          elif [[ "${{ runner.os }}" == "Windows" ]]; then
+            yarn package --win --publish never
+          else
+            yarn package --linux --publish never
+          fi
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: art-${{ runner.os }}
+          path: release/build/**
+
+  release:
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Read version
+        id: version
+        run: echo "::set-output name=tag::v$(jq -r .version < package.json)"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: AudioMid ${{ steps.version.outputs.tag }}
+          body: |
+            Automated build for commit ${{ github.sha }}.
+
+            Windows and Linux builds are generated automatically but remain untested.
+          draft: false
+          prerelease: false
         env:
-          # The APPLE_* values are used for auto updates signing
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASS }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          # This is used for uploading release assets to github
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          npm exec electron-builder -- --publish always --win --mac --linux
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach artefacts
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
