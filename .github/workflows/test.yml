@@ -24,12 +24,6 @@ jobs:
         run: |
           npm install
 
-      - name: Force GitHub HTTPS instead of SSH
-        shell: bash
-        run: |
-          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-
       - name: npm test
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
