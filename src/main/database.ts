@@ -1,7 +1,8 @@
 import Database from 'better-sqlite3';
+import crypto from 'crypto';
 import { app } from 'electron';
 import path from 'path';
-import crypto from 'crypto';
+import { DEFAULT_SYSTEM_PROMPT } from '../common/defaultPrompt';
 
 export interface AppSettings {
   id?: number;
@@ -30,7 +31,10 @@ export interface AppSettings {
     enableVAD: boolean;
   };
   geminiSettings?: {
-    model: 'gemini-2.5-flash-preview-native-audio-dialog' | 'gemini-live-2.5-flash-preview' | 'gemini-2.0-flash-live-001';
+    model:
+      | 'gemini-2.5-flash-preview-native-audio-dialog'
+      | 'gemini-live-2.5-flash-preview'
+      | 'gemini-2.0-flash-live-001';
     audioArchitecture: 'native' | 'half-cascade';
     responseModalities: string[];
   };
@@ -68,7 +72,7 @@ class DatabaseManager {
   private getOrCreateEncryptionKey(): string {
     const keyPath = path.join(app.getPath('userData'), '.app-key');
     const fs = require('fs');
-    
+
     if (fs.existsSync(keyPath)) {
       return fs.readFileSync(keyPath, 'utf8');
     } else {
@@ -84,10 +88,10 @@ class DatabaseManager {
       const iv = crypto.randomBytes(16);
       const key = crypto.scryptSync(this.encryptionKey, 'salt', 32);
       const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
-      
+
       let encrypted = cipher.update(text, 'utf8', 'hex');
       encrypted += cipher.final('hex');
-      
+
       // Prepend IV to encrypted data
       return iv.toString('hex') + ':' + encrypted;
     } catch (error) {
@@ -103,12 +107,12 @@ class DatabaseManager {
       if (parts.length !== 2) {
         throw new Error('Invalid encrypted format');
       }
-      
+
       const iv = Buffer.from(parts[0], 'hex');
       const encrypted = parts[1];
       const key = crypto.scryptSync(this.encryptionKey, 'salt', 32);
       const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-      
+
       let decrypted = decipher.update(encrypted, 'hex', 'utf8');
       decrypted += decipher.final('utf8');
       return decrypted;
@@ -177,7 +181,9 @@ class DatabaseManager {
 
     // Migration: Add AI provider column if it doesn't exist
     try {
-      this.db.exec(`ALTER TABLE settings ADD COLUMN aiProvider TEXT DEFAULT 'openai'`);
+      this.db.exec(
+        `ALTER TABLE settings ADD COLUMN aiProvider TEXT DEFAULT 'openai'`,
+      );
       console.log('✅ Added aiProvider column to settings table');
     } catch {
       // Column already exists, which is fine
@@ -208,7 +214,9 @@ class DatabaseManager {
       console.log('✅ Added transcriptSettings column to settings table');
     } catch {
       // Column already exists, which is fine
-      console.log('📝 transcriptSettings column already exists in settings table');
+      console.log(
+        '📝 transcriptSettings column already exists in settings table',
+      );
     }
 
     // Conversations table
@@ -232,68 +240,94 @@ class DatabaseManager {
         invisibleToRecording: true,
         windowWidth: 800,
         windowHeight: 600,
+        systemPrompt: DEFAULT_SYSTEM_PROMPT,
         theme: 'dark',
         autoStart: false,
         showInTray: true,
-        lastUpdated: new Date().toISOString()
+        lastUpdated: new Date().toISOString(),
       });
     }
   }
 
   public getSettings(): AppSettings | null {
-    const stmt = this.db.prepare('SELECT * FROM settings ORDER BY id DESC LIMIT 1');
+    const stmt = this.db.prepare(
+      'SELECT * FROM settings ORDER BY id DESC LIMIT 1',
+    );
     const row = stmt.get() as any;
-    
+
     if (!row) return null;
 
     return {
       ...row,
-      openaiApiKey: row.openaiApiKey ? this.decrypt(row.openaiApiKey) : undefined,
-      geminiApiKey: row.geminiApiKey ? this.decrypt(row.geminiApiKey) : undefined,
+      systemPrompt: row.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+      openaiApiKey: row.openaiApiKey
+        ? this.decrypt(row.openaiApiKey)
+        : undefined,
+      geminiApiKey: row.geminiApiKey
+        ? this.decrypt(row.geminiApiKey)
+        : undefined,
       aiProvider: row.aiProvider || 'openai',
       alwaysOnTop: Boolean(row.alwaysOnTop),
       invisibleToRecording: Boolean(row.invisibleToRecording),
       autoStart: Boolean(row.autoStart),
       showInTray: Boolean(row.showInTray),
-      vadSettings: row.vadSettings ? JSON.parse(row.vadSettings) : {
-        releaseMs: 2000,
-        holdMs: 200,
-        threshold: 0.02,
-        adaptiveNoiseFloor: true,
-      },
-      audioSettings: row.audioSettings ? JSON.parse(row.audioSettings) : {
-        bufferSizeMs: 1000,
-        enableVAD: true,
-      },
-      geminiSettings: row.geminiSettings ? JSON.parse(row.geminiSettings) : {
-        model: 'gemini-2.5-flash-preview-native-audio-dialog',
-        audioArchitecture: 'native',
-        responseModalities: ['AUDIO'],
-      },
-      debugSettings: row.debugSettings ? JSON.parse(row.debugSettings) : {
-        dumpNativeAudio: false,
-        dumpOpenAIRawAudio: false,
-        dumpOpenAIApiAudio: false,
-      },
-      transcriptSettings: row.transcriptSettings ? JSON.parse(row.transcriptSettings) : {
-        enabled: false,
-      }
+      vadSettings: row.vadSettings
+        ? JSON.parse(row.vadSettings)
+        : {
+            releaseMs: 2000,
+            holdMs: 200,
+            threshold: 0.02,
+            adaptiveNoiseFloor: true,
+          },
+      audioSettings: row.audioSettings
+        ? JSON.parse(row.audioSettings)
+        : {
+            bufferSizeMs: 1000,
+            enableVAD: true,
+          },
+      geminiSettings: row.geminiSettings
+        ? JSON.parse(row.geminiSettings)
+        : {
+            model: 'gemini-2.5-flash-preview-native-audio-dialog',
+            audioArchitecture: 'native',
+            responseModalities: ['AUDIO'],
+          },
+      debugSettings: row.debugSettings
+        ? JSON.parse(row.debugSettings)
+        : {
+            dumpNativeAudio: false,
+            dumpOpenAIRawAudio: false,
+            dumpOpenAIApiAudio: false,
+          },
+      transcriptSettings: row.transcriptSettings
+        ? JSON.parse(row.transcriptSettings)
+        : {
+            enabled: false,
+          },
     };
   }
 
   public saveSettings(settings: Partial<AppSettings>): void {
-    const currentSettings = this.getSettings() || {} as AppSettings;
-    const updatedSettings = { ...currentSettings, ...settings, lastUpdated: new Date().toISOString() };
+    const currentSettings = this.getSettings() || ({} as AppSettings);
+    const updatedSettings = {
+      ...currentSettings,
+      ...settings,
+      lastUpdated: new Date().toISOString(),
+    };
 
     // Encrypt API keys if provided
-    const openaiApiKeyToStore = updatedSettings.openaiApiKey ? this.encrypt(updatedSettings.openaiApiKey) : null;
-    const geminiApiKeyToStore = updatedSettings.geminiApiKey ? this.encrypt(updatedSettings.geminiApiKey) : null;
+    const openaiApiKeyToStore = updatedSettings.openaiApiKey
+      ? this.encrypt(updatedSettings.openaiApiKey)
+      : null;
+    const geminiApiKeyToStore = updatedSettings.geminiApiKey
+      ? this.encrypt(updatedSettings.geminiApiKey)
+      : null;
 
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO settings (
         id, openaiApiKey, geminiApiKey, aiProvider, systemPrompt, windowOpacity, alwaysOnTop, invisibleToRecording,
-        windowWidth, windowHeight, windowX, windowY, theme, autoStart, showInTray, vadSettings, audioSettings, geminiSettings, lastUpdated
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        windowWidth, windowHeight, windowX, windowY, theme, autoStart, showInTray, vadSettings, audioSettings, geminiSettings, debugSettings, transcriptSettings, lastUpdated
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -311,14 +345,28 @@ class DatabaseManager {
       updatedSettings.theme,
       updatedSettings.autoStart ? 1 : 0,
       updatedSettings.showInTray ? 1 : 0,
-      updatedSettings.vadSettings ? JSON.stringify(updatedSettings.vadSettings) : null,
-      updatedSettings.audioSettings ? JSON.stringify(updatedSettings.audioSettings) : null,
-      updatedSettings.geminiSettings ? JSON.stringify(updatedSettings.geminiSettings) : null,
-      updatedSettings.lastUpdated
+      updatedSettings.vadSettings
+        ? JSON.stringify(updatedSettings.vadSettings)
+        : null,
+      updatedSettings.audioSettings
+        ? JSON.stringify(updatedSettings.audioSettings)
+        : null,
+      updatedSettings.geminiSettings
+        ? JSON.stringify(updatedSettings.geminiSettings)
+        : null,
+      updatedSettings.debugSettings
+        ? JSON.stringify(updatedSettings.debugSettings)
+        : null,
+      updatedSettings.transcriptSettings
+        ? JSON.stringify(updatedSettings.transcriptSettings)
+        : null,
+      updatedSettings.lastUpdated,
     );
   }
 
-  public saveConversation(conversation: Omit<ConversationRecord, 'id'>): number {
+  public saveConversation(
+    conversation: Omit<ConversationRecord, 'id'>,
+  ): number {
     const stmt = this.db.prepare(`
       INSERT INTO conversations (timestamp, userInput, aiResponse, audioMetadata, duration)
       VALUES (?, ?, ?, ?, ?)
@@ -329,13 +377,16 @@ class DatabaseManager {
       conversation.userInput,
       conversation.aiResponse,
       conversation.audioMetadata,
-      conversation.duration
+      conversation.duration,
     );
 
     return result.lastInsertRowid as number;
   }
 
-  public getConversations(limit: number = 50, offset: number = 0): ConversationRecord[] {
+  public getConversations(
+    limit: number = 50,
+    offset: number = 0,
+  ): ConversationRecord[] {
     const stmt = this.db.prepare(`
       SELECT * FROM conversations 
       ORDER BY timestamp DESC 
@@ -345,7 +396,10 @@ class DatabaseManager {
     return stmt.all(limit, offset) as ConversationRecord[];
   }
 
-  public searchConversations(query: string, limit: number = 20): ConversationRecord[] {
+  public searchConversations(
+    query: string,
+    limit: number = 20,
+  ): ConversationRecord[] {
     const stmt = this.db.prepare(`
       SELECT * FROM conversations 
       WHERE aiResponse LIKE ? OR userInput LIKE ?

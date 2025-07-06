@@ -1,5 +1,6 @@
 {
   "name": "audiomid",
+  "version": "0.0.1",
   "description": "Minimalist AI audio assistant that captures system audio with real-time processing",
   "keywords": [
     "electron",
