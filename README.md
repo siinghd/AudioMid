@@ -16,9 +16,9 @@ AudioMid is a desktop application that captures system audio in real time and st
 
 ## Pre-built binaries
 
-Signed macOS builds (`.dmg` and `.zip`) are attached to each release.
+Pre-built binaries (`.dmg`, `.zip`, `.exe`, `.AppImage`) are attached to each release.
 
-> Windows and Linux artefacts are produced but have not been tested on physical machines. Expect issues with audio capture or device permissions.
+> Windows and Linux builds are generated automatically but remain untested on physical machines. Expect issues with audio capture or device permissions.
 
 ---
 
@@ -26,37 +26,76 @@ Signed macOS builds (`.dmg` and `.zip`) are attached to each release.
 
 ### Requirements
 
-- Node.js ≥ 18 with Corepack (Yarn classic).
-- CMake and a C/C++ tool-chain.
-- macOS: Xcode Command-Line Tools.  
-  Windows: Visual Studio Build Tools.  
-  Linux: `build-essential`, ALSA development headers.
+- **Node.js** ≥ 18 with Corepack (Yarn classic)
+- **CMake** ≥ 3.16 and a C/C++ toolchain
+- **Platform-specific dependencies:**
+  - **macOS:** Xcode Command-Line Tools
+  - **Windows:** Visual Studio Build Tools with C++ workload
+  - **Linux:** `build-essential`, `cmake`, `libpulse-dev`, `libx11-dev`
 
-### Clone and run in development mode
+### Clone and setup
 
 ```bash
 git clone https://github.com/siinghd/AudioMid.git
 cd AudioMid
 corepack enable
 yarn install
-yarn dev   # starts Electron and React in watch mode
 ```
 
-The native C++ module for audio capture is compiled automatically during the `yarn install` step. If you need to rebuild it manually, run `yarn build:native`.
+### Build native modules
+
+The project includes C++ modules for audio capture and window privacy that must be compiled:
+
+```bash
+# Build native C++ modules
+yarn build:native
+
+# Or build manually with cmake-js
+npx cmake-js compile
+```
+
+### Development mode
+
+```bash
+yarn dev   # starts Electron and React in watch mode
+```
 
 ### Package binaries
 
 ```bash
-# Platform-specific
-yarn package --mac      # DMG and ZIP
-yarn package --win      # NSIS installer
-yarn package --linux    # AppImage and DEB
+# Platform-specific builds
+yarn package --mac      # Creates DMG and ZIP for macOS
+yarn package --win      # Creates NSIS installer for Windows  
+yarn package --linux    # Creates AppImage for Linux
 
-# All supported targets (requires wine + mono for Windows cross-compile)
+# Build for current platform only
 yarn package
 ```
 
-The resulting files are written to `release/build/`.
+**Build output location:** `release/build/`
+
+### Troubleshooting
+
+**Linux build issues:**
+```bash
+# Install required dependencies
+sudo apt-get update
+sudo apt-get install build-essential cmake libpulse-dev libx11-dev
+```
+
+**macOS permission issues:**
+```bash
+# If you get permission errors, ensure Xcode tools are installed
+xcode-select --install
+```
+
+**Native module rebuild:**
+```bash
+# If native modules fail to load
+yarn build:native
+# or
+yarn rebuild
+```
 
 ---
 
