@@ -21,6 +21,16 @@ jobs:
           node-version: 20
           cache: yarn
 
+      - name: Set up Python for node-gyp
+        if: runner.os == 'macOS'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install setuptools for node-gyp
+        if: runner.os == 'macOS'
+        run: pip install setuptools
+
       - name: Install dependencies
         run: |
           corepack enable
