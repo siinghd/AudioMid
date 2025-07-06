@@ -32,6 +32,16 @@ jobs:
         if: runner.os == 'macOS'
         run: pip install setuptools
 
+      - name: Install build tools
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential cmake libpulse-dev
+          elif [[ "${{ runner.os }}" == "Windows" ]]; then
+            choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+          fi
+
       - name: Install dependencies
         run: |
           corepack enable
@@ -39,7 +49,9 @@ jobs:
 
       # Build native modules
       - name: Build native modules
-        run: yarn build:native
+        run: |
+          npx cmake-js compile --runtime=electron --runtime-version=37.2.0 --arch=${{ matrix.os == 'macos-14' && 'arm64' || 'x64' }}
+          yarn electron-builder install-app-deps
 
       # Build platform-specific artefacts
       - name: Build application
