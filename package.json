@@ -1,6 +1,7 @@
 {
   "name": "audiomid",
   "version": "0.0.1",
+  "packageManager": "yarn@1.22.19",
   "description": "Minimalist AI audio assistant that captures system audio with real-time processing",
   "keywords": [
     "electron",
@@ -262,11 +263,6 @@
     "runtime": {
       "name": "node",
       "version": ">=14.x",
-      "onFail": "error"
-    },
-    "packageManager": {
-      "name": "yarn",
-      "version": "1.22.19",
       "onFail": "error"
     }
   },
