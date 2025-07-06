@@ -60,6 +60,9 @@ public:
     
     // Get last error message
     virtual std::string GetLastError() const = 0;
+    
+    // Set noise gate threshold (0.0 = pass all audio, 0.02 = default gate)
+    virtual void SetNoiseGateThreshold(float threshold) = 0;
 
 protected:
     AudioCallback audioCallback_;

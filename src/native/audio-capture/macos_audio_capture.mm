@@ -56,7 +56,6 @@
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
     if (error) {
-        NSLog(@"ScreenCaptureKit stream stopped with error: %@", error.localizedDescription);
         if (self.captureInstance) {
             self.captureInstance->SetLastError([error.localizedDescription UTF8String]);
         }
@@ -68,7 +67,7 @@
 namespace AudioCapture {
 
 MacOSAudioCapture::MacOSAudioCapture()
-    : stream_(nil), streamDelegate_(nil), shouldStop_(false) {
+    : stream_(nil), streamDelegate_(nil), shouldStop_(false), noiseGateThreshold_(0.02f) {
     
     // Initialize default format (will be updated when stream starts)
     currentFormat_.sampleRate = 48000;
@@ -101,19 +100,15 @@ bool MacOSAudioCapture::Start() {
             [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent * _Nullable content, NSError * _Nullable error) {
                 if (error) {
                     asyncError = std::string("Failed to get shareable content: ") + [error.localizedDescription UTF8String];
-                    NSLog(@"❌ SCShareableContent error: %@", error);
                     dispatch_semaphore_signal(semaphore);
                     return;
                 }
                 
                 if (!content || content.displays.count == 0) {
                     asyncError = "No displays available for capture";
-                    NSLog(@"❌ No displays available - content: %@, display count: %lu", content, (unsigned long)(content ? content.displays.count : 0));
                     dispatch_semaphore_signal(semaphore);
                     return;
                 }
-                
-                NSLog(@"✅ Got shareable content with %lu displays", (unsigned long)content.displays.count);
                 
                 // Use the first display
                 SCDisplay* display = content.displays.firstObject;
@@ -141,7 +136,6 @@ bool MacOSAudioCapture::Start() {
                 config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
                 
                 // Create the stream and assign to class member
-                NSLog(@"🔧 Creating ScreenCaptureKit stream with display: %@", display);
                 SCStream* newStream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:(id<SCStreamDelegate>)streamDelegate_];
                 
                 // CRITICAL: Ensure stream is retained properly to avoid premature deallocation
@@ -151,15 +145,10 @@ bool MacOSAudioCapture::Start() {
                 __strong SCStream* strongStream = stream_;
                 
                 if (!stream_) {
-                    NSLog(@"❌ Failed to create SCStream object");
                     asyncError = "Failed to create ScreenCaptureKit stream";
                     dispatch_semaphore_signal(semaphore);
                     return;
                 }
-                NSLog(@"✅ SCStream created successfully");
-                
-                // Add audio output
-                NSLog(@"🔊 Adding audio output to stream...");
                 NSError* addOutputError = nil;
                 BOOL addSuccess = [stream_ addStreamOutput:(id<SCStreamOutput>)streamDelegate_ 
                                                       type:SCStreamOutputTypeAudio 
@@ -167,32 +156,21 @@ bool MacOSAudioCapture::Start() {
                                                        error:&addOutputError];
                 
                 if (!addSuccess || addOutputError) {
-                    NSLog(@"❌ Failed to add audio output: %@", addOutputError);
                     asyncError = std::string("Failed to add audio output: ") + 
                                 [addOutputError.localizedDescription UTF8String];
                     dispatch_semaphore_signal(semaphore);
                     return;
                 }
-                NSLog(@"✅ Audio output added successfully");
                 
                 // Start the capture stream
-                NSLog(@"🚀 Starting ScreenCaptureKit stream... stream object: %@", strongStream);
-                NSLog(@"🔍 Stream delegate: %@", streamDelegate_);
-                NSLog(@"🔍 Stream state before start: valid=%@", strongStream ? @"YES" : @"NO");
-                
                 [strongStream startCaptureWithCompletionHandler:^(NSError * _Nullable startError) {
-                    NSLog(@"📥 Start completion handler called - stream_: %@", strongStream);
                     if (startError) {
-                        NSLog(@"❌ Stream start failed with error: %@", startError);
-                        NSLog(@"❌ Error domain: %@, code: %ld", startError.domain, (long)startError.code);
-                        NSLog(@"❌ User info: %@", startError.userInfo);
                         asyncError = std::string("Failed to start capture: ") + 
                                     [startError.localizedDescription UTF8String] +
                                     " (domain: " + [startError.domain UTF8String] +
                                     ", code: " + std::to_string(startError.code) + ")";
                         success = false;
                     } else {
-                        NSLog(@"✅ ScreenCaptureKit stream started successfully!");
                         success = true;
                         isCapturing_ = true;
                         lastError_ = "";
@@ -229,9 +207,7 @@ bool MacOSAudioCapture::Stop() {
     @autoreleasepool {
         if (stream_) {
             [stream_ stopCaptureWithCompletionHandler:^(NSError * _Nullable error) {
-                if (error) {
-                    NSLog(@"Error stopping capture: %@", error.localizedDescription);
-                }
+                // Silently handle stop errors
             }];
             stream_ = nil;
         }
@@ -319,10 +295,13 @@ void MacOSAudioCapture::SetLastError(const std::string& error) {
     lastError_ = error;
 }
 
+void MacOSAudioCapture::SetNoiseGateThreshold(float threshold) {
+    noiseGateThreshold_ = threshold;
+}
+
 void MacOSAudioCapture::OnAudioData(const uint8_t* data, size_t length) {
     if (audioCallback_ && data && length > 0) {
-        // Apply noise gate - filter out background noise
-        const float noiseThreshold = 0.02f; // Adjust this value to filter more/less noise
+        // Apply configurable noise gate - filter out background noise
         
         // Calculate current RMS level for gating
         float rms = 0.0f;
@@ -347,8 +326,9 @@ void MacOSAudioCapture::OnAudioData(const uint8_t* data, size_t length) {
             rms = sqrt(rms / sampleCount);
         }
         
-        // Only send audio if it's above the noise threshold
-        if (rms > noiseThreshold) {
+        // Only send audio if it's above the configurable noise threshold
+        // Special case: threshold 0.0 means disable noise gate (allow all audio)
+        if (noiseGateThreshold_ <= 0.0f || rms > noiseGateThreshold_) {
             AudioSample sample;
             sample.data.assign(data, data + length);
             sample.format = currentFormat_;

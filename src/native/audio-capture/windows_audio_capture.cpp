@@ -349,6 +349,13 @@ AudioFormat WindowsAudioCapture::WaveFormatToAudioFormat(const WAVEFORMATEX* wf)
     return format;
 }
 
+void WindowsAudioCapture::SetNoiseGateThreshold(float threshold) {
+    // Windows WASAPI doesn't have a built-in noise gate like macOS ScreenCaptureKit
+    // This is a no-op for Windows - noise gating will be handled in JavaScript VAD
+    // Log the threshold for debugging purposes
+    lastError_ = "";  // Clear any previous errors
+}
+
 std::string WindowsAudioCapture::GetCOMErrorString(HRESULT hr) {
     std::stringstream ss;
     ss << "HRESULT 0x" << std::hex << std::uppercase << hr;

@@ -4,10 +4,10 @@
  * AI Audio Assistant - Electron main process
  * Captures system audio and processes it with GPT-4o Realtime API
  */
-import path from 'path';
-import { app, BrowserWindow, shell, ipcMain } from 'electron';
-import { autoUpdater } from 'electron-updater';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import log from 'electron-log';
+import { autoUpdater } from 'electron-updater';
+import path from 'path';
 import MenuBuilder from './menu';
 import { resolveHtmlPath } from './util';
 
@@ -15,8 +15,13 @@ import { resolveHtmlPath } from './util';
 import DatabaseManager, { AppSettings } from './database';
 
 // Import audio capture and AI pipeline modules
-import { AudioCapture } from './audio-capture';
+import {
+  AudioProviderFactory,
+  ProviderFactoryConfig,
+} from '../audio/audio-provider-factory';
+import { BaseAudioProvider } from '../audio/audio-provider-interface';
 import AudioPipeline from '../audio/pipeline';
+import { AudioCapture } from './audio-capture';
 import { PrivacyManager } from './privacy';
 
 class AppUpdater {
@@ -30,95 +35,68 @@ class AppUpdater {
 let mainWindow: BrowserWindow | null = null;
 let database: DatabaseManager | null = null;
 let audioCapture: AudioCapture | null = null;
-let audioPipeline: AudioPipeline | null = null;
+let audioPipeline: AudioPipeline | BaseAudioProvider | null = null;
 let privacyManager: PrivacyManager | null = null;
-let cachedAudioBuffer: { buffer: Buffer; sampleRate: number; channels: number; isFloat?: boolean } | null = null;
-let audioEventCount = 0;
-let recordingBuffer: Float32Array[] = []; // Accumulate audio for replay
 
 // IPC handlers for audio controls
 ipcMain.on('audio-start', async (event) => {
   // Starting audio capture and AI pipeline
-  
-  // Clear cached audio buffer when starting new recording
-  cachedAudioBuffer = null;
-  audioEventCount = 0;
-  recordingBuffer = []; // Clear recording buffer
-  
+
   if (!audioCapture || !audioPipeline) {
     console.error('Audio capture or pipeline not initialized');
-    event.reply('audio-status', { recording: false, error: 'Audio system not initialized' });
+    event.reply('audio-status', {
+      recording: false,
+      error: 'Audio system not initialized',
+    });
     return;
   }
-  
+
   try {
     // Start the AI pipeline first
     if (!audioPipeline.isReady()) {
       await audioPipeline.initialize();
     }
     audioPipeline.start();
-    
+
     // Then start audio capture
     const success = await audioCapture.start();
     event.reply('audio-status', { recording: success });
-    
+
     if (!success) {
-      console.error('Failed to start audio capture:', audioCapture.getLastError());
+      console.error(
+        'Failed to start audio capture:',
+        audioCapture.getLastError(),
+      );
       audioPipeline.stop();
     }
   } catch (error) {
     console.error('Failed to start audio pipeline:', error);
-    event.reply('audio-status', { recording: false, error: 'Failed to start AI pipeline' });
+    event.reply('audio-status', {
+      recording: false,
+      error: 'Failed to start AI pipeline',
+    });
   }
 });
 
 ipcMain.on('audio-stop', async (event) => {
   // Stopping audio capture and AI pipeline
-  
+
   if (audioPipeline) {
+    // Flush any remaining audio for Gemini Live API
+    if (audioPipeline.flushAudio) {
+      audioPipeline.flushAudio();
+    }
     audioPipeline.stop();
   }
-  
+
   if (!audioCapture) {
     event.reply('audio-status', { recording: false });
     return;
   }
-  
-  // Cache the audio buffer BEFORE stopping (to preserve it for replay)
-  try {
-    // Total audio events received and recording buffer chunks tracked
-    
-    // Combine all recorded chunks into a single Float32Array
-    if (recordingBuffer.length > 0) {
-      const totalSamples = recordingBuffer.reduce((sum, chunk) => sum + chunk.length, 0);
-      const combinedFloat32 = new Float32Array(totalSamples);
-      let offset = 0;
-      
-      for (const chunk of recordingBuffer) {
-        combinedFloat32.set(chunk, offset);
-        offset += chunk.length;
-      }
-      
-      cachedAudioBuffer = {
-        buffer: Buffer.from(combinedFloat32.buffer),
-        sampleRate: 48000,
-        channels: 1,
-        isFloat: true  // Flag to indicate this is Float32 data
-      };
-      
-      // Cached audio samples for replay
-    } else {
-      cachedAudioBuffer = null;
-      // No recorded audio to cache
-    }
-  } catch (error) {
-    console.error('Failed to cache audio for replay:', error);
-    cachedAudioBuffer = null;
-  }
-  
+
   const success = await audioCapture.stop();
   event.reply('audio-status', { recording: false });
-  
+
   if (!success) {
     console.error('Failed to stop audio capture:', audioCapture.getLastError());
   }
@@ -126,29 +104,18 @@ ipcMain.on('audio-stop', async (event) => {
 
 ipcMain.on('clear-response', async (event) => {
   // Clearing AI response
-  
+
   // Clear audio buffer if available
   if (audioCapture) {
     audioCapture.clearBuffer();
   }
-  
+
   // Clear transcript history
   if (audioPipeline) {
     audioPipeline.clearTranscriptHistory();
   }
-  
-  event.reply('response-cleared');
-});
 
-// Get buffered audio for replay
-ipcMain.handle('get-buffered-audio', async () => {
-  if (!cachedAudioBuffer) {
-    // No cached audio buffer available
-    return null;
-  }
-  
-  // Returning cached audio buffer
-  return cachedAudioBuffer;
+  event.reply('response-cleared');
 });
 
 // Settings IPC handlers
@@ -157,19 +124,144 @@ ipcMain.handle('get-settings', async () => {
   return database.getSettings();
 });
 
-ipcMain.handle('save-settings', async (event, settings: Partial<AppSettings>) => {
-  if (!database) return false;
+ipcMain.handle(
+  'save-settings',
+  async (event, settings: Partial<AppSettings>) => {
+    console.log('💾 [Settings] Saving settings:', settings);
+    if (!database) return false;
+    try {
+      database.saveSettings(settings);
+
+      // If OpenAI API key was updated, reinitialize the pipeline
+      if (settings.openaiApiKey && !audioPipeline) {
+        console.log('🔧 [Settings] Initializing OpenAI pipeline after settings save...');
+        await initializeAudioPipeline(
+          settings.openaiApiKey,
+          settings.systemPrompt,
+        );
+      }
+
+      console.log('✅ [Settings] Settings saved successfully');
+      return true;
+    } catch (error) {
+      console.error('❌ [Settings] Failed to save settings:', error);
+      return false;
+    }
+  },
+);
+
+// Add handler for re-initialization
+ipcMain.handle('re-initialize-app', async (event) => {
+  console.log('🔄 [Settings] Re-initialization requested...');
   try {
-    database.saveSettings(settings);
+    // Reset initialization state
+    const settings = database?.getSettings();
     
-    // If OpenAI API key was updated, reinitialize the pipeline
-    if (settings.openaiApiKey && !audioPipeline) {
-      await initializeAudioPipeline(settings.openaiApiKey, settings.systemPrompt);
+    // Start the initialization process again
+    if (mainWindow) {
+      // Trigger the same initialization that happens on app startup
+      const { systemPreferences } = require('electron');
+      
+      // Re-initialize audio capture if needed
+      console.log('🚀 [ReInit] Starting complete app re-initialization...');
+      
+      // Request permissions on macOS (if needed)
+      if (process.platform === 'darwin') {
+        const micStatus = systemPreferences.getMediaAccessStatus('microphone');
+        if (micStatus !== 'granted') {
+          const micGranted = await systemPreferences.askForMediaAccess('microphone');
+        }
+      }
+
+      // Notify renderer about initialization progress
+      console.log('🔧 [ReInit] Starting audio capture initialization...');
+      mainWindow.webContents.send('initialization-progress', {
+        step: 'audio-capture',
+        status: 'initializing',
+        message: 'Initializing audio capture...'
+      });
+
+      // Audio capture should already be initialized, so mark as completed
+      console.log('✅ [ReInit] Audio capture initialization completed');
+      mainWindow.webContents.send('initialization-progress', {
+        step: 'audio-capture',
+        status: 'completed',
+        message: 'Audio capture initialized successfully'
+      });
+
+      // Initialize AI pipeline with current settings
+      const aiProvider = settings?.aiProvider || 'openai';
+      const apiKey = aiProvider === 'openai' ? settings?.openaiApiKey : settings?.geminiApiKey;
+
+      if (apiKey) {
+        console.log(`🔧 [ReInit] Starting ${aiProvider.toUpperCase()} pipeline initialization...`);
+        mainWindow.webContents.send('initialization-progress', {
+          step: 'ai-pipeline',
+          status: 'initializing',
+          message: `Initializing ${aiProvider.toUpperCase()} pipeline...`
+        });
+        
+        try {
+          // Clean up existing pipeline first
+          if (audioPipeline) {
+            audioPipeline.disconnect();
+            audioPipeline = null;
+          }
+          
+          await initializeAudioPipeline(
+            apiKey,
+            settings?.systemPrompt,
+            aiProvider,
+          );
+          
+          console.log(`✅ [ReInit] ${aiProvider.toUpperCase()} pipeline initialization completed`);
+          mainWindow.webContents.send('initialization-progress', {
+            step: 'ai-pipeline',
+            status: 'completed',
+            message: `${aiProvider.toUpperCase()} pipeline initialized successfully`
+          });
+        } catch (error) {
+          console.error(`❌ [ReInit] ${aiProvider.toUpperCase()} pipeline initialization failed:`, error);
+          mainWindow.webContents.send('initialization-progress', {
+            step: 'ai-pipeline',
+            status: 'error',
+            message: `Failed to initialize ${aiProvider.toUpperCase()} pipeline`
+          });
+          return false;
+        }
+      } else {
+        console.log('⏭️ [ReInit] AI pipeline skipped - no API key');
+        mainWindow.webContents.send('initialization-progress', {
+          step: 'ai-pipeline',
+          status: 'skipped',
+          message: `No API key found - please configure in settings`
+        });
+      }
+
+      // Signal that initialization is complete
+      console.log('🎉 [ReInit] All re-initialization completed successfully');
+      mainWindow.webContents.send('initialization-progress', {
+        step: 'complete',
+        status: 'completed',
+        message: 'Initialization complete'
+      });
+      
+      return true;
     }
     
-    return true;
+    return false;
   } catch (error) {
-    console.error('Failed to save settings:', error);
+    console.error('💥 [ReInit] CRITICAL: Re-initialization failed:', error);
+    
+    // Send error to renderer
+    if (mainWindow) {
+      mainWindow.webContents.send('initialization-progress', {
+        step: 'error',
+        status: 'error',
+        message: `Re-initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      });
+    }
+    
     return false;
   }
 });
@@ -202,170 +294,356 @@ ipcMain.handle('update-system-prompt', async (event, prompt: string) => {
   }
 });
 
-ipcMain.handle('configure-vad', async (event, enabled: boolean, threshold: number) => {
-  if (!audioPipeline) return false;
-  try {
-    audioPipeline.setVADConfig(enabled, threshold);
-    return true;
-  } catch (error) {
-    console.error('Failed to configure VAD:', error);
-    return false;
-  }
-});
+ipcMain.handle(
+  'configure-vad',
+  async (event, enabled: boolean, threshold: number) => {
+    if (!audioPipeline) return false;
+    try {
+      audioPipeline.setVADConfig(enabled, threshold);
+      return true;
+    } catch (error) {
+      console.error('Failed to configure VAD:', error);
+      return false;
+    }
+  },
+);
 
-ipcMain.handle('initialize-pipeline', async (event, openaiApiKey: string, systemPrompt?: string) => {
+// Update VAD settings in real-time
+ipcMain.handle('update-vad-settings', async (event, vadSettings: any) => {
+  if (!audioPipeline)
+    return { success: false, error: 'Audio pipeline not initialized' };
+
   try {
-    if (audioPipeline) {
-      // Disconnect existing pipeline first
-      audioPipeline.disconnect();
-      audioPipeline = null;
+    // Update the pipeline with new VAD settings
+    audioPipeline.setVADConfig(vadSettings.enableVAD, vadSettings.threshold);
+    
+    // Update audio capture VAD aggressiveness if available
+    if (audioCapture && vadSettings.aggressiveness !== undefined) {
+      // Check if VAD is initialized and update aggressiveness
+      if (audioCapture.isVADInitialized()) {
+        audioCapture.setVADMode(vadSettings.aggressiveness);
+        console.log(`🔧 Updated VAD aggressiveness to ${vadSettings.aggressiveness}`);
+      } else {
+        // Re-create VAD with new aggressiveness
+        audioCapture.createVAD(48000, vadSettings.aggressiveness);
+        console.log(`🔧 Re-created VAD with aggressiveness ${vadSettings.aggressiveness}`);
+      }
     }
     
-    await initializeAudioPipeline(openaiApiKey, systemPrompt);
-    return true;
+    console.log('🔧 Updated VAD settings:', vadSettings);
+    return { success: true };
   } catch (error) {
-    console.error('Failed to initialize pipeline:', error);
-    return false;
+    console.error('Failed to update VAD settings:', error);
+    return { success: false, error: 'Failed to update VAD settings' };
   }
 });
 
-ipcMain.handle('apply-window-settings', async (event, windowSettings: { 
-  opacity: number; 
-  alwaysOnTop: boolean; 
-  invisibleToRecording: boolean 
-}) => {
-  if (!mainWindow) return false;
-  
+// Update audio buffer settings in real-time
+ipcMain.handle('update-audio-settings', async (event, audioSettings: any) => {
+  if (!audioPipeline)
+    return { success: false, error: 'Audio pipeline not initialized' };
+
   try {
-    // Apply opacity
-    mainWindow.setOpacity(windowSettings.opacity);
-    
-    // Apply always on top
-    mainWindow.setAlwaysOnTop(windowSettings.alwaysOnTop, 'screen-saver');
-    
-    // Apply invisibility to recording (platform-specific)
-    await setWindowInvisibleToRecording(mainWindow, windowSettings.invisibleToRecording);
-    
-    return true;
+    // For buffer size changes, we would need to restart the pipeline
+    // But we can update other audio settings immediately
+    console.log(
+      '🔧 Audio settings updated (restart required for buffer changes):',
+      audioSettings,
+    );
+    return { success: true, restartRequired: true };
   } catch (error) {
-    console.error('Failed to apply window settings:', error);
-    return false;
+    console.error('Failed to update audio settings:', error);
+    return { success: false, error: 'Failed to update audio settings' };
   }
 });
 
-// Initialize audio pipeline with API key
-async function initializeAudioPipeline(openaiApiKey: string, systemPrompt?: string): Promise<void> {
+ipcMain.handle(
+  'initialize-pipeline',
+  async (
+    event,
+    apiKey: string,
+    systemPrompt?: string,
+    provider?: 'openai' | 'gemini',
+  ) => {
+    try {
+      if (audioPipeline) {
+        // Disconnect existing pipeline first
+        audioPipeline.disconnect();
+        audioPipeline = null;
+      }
+
+      await initializeAudioPipeline(apiKey, systemPrompt, provider);
+      return true;
+    } catch (error) {
+      console.error('Failed to initialize pipeline:', error);
+      return false;
+    }
+  },
+);
+
+ipcMain.handle(
+  'apply-window-settings',
+  async (
+    event,
+    windowSettings: {
+      opacity: number;
+      alwaysOnTop: boolean;
+      invisibleToRecording: boolean;
+    },
+  ) => {
+    if (!mainWindow) return false;
+
+    try {
+      // Apply opacity
+      mainWindow.setOpacity(windowSettings.opacity);
+
+      // Apply always on top
+      mainWindow.setAlwaysOnTop(windowSettings.alwaysOnTop, 'screen-saver');
+
+      // Apply invisibility to recording (platform-specific)
+      await setWindowInvisibleToRecording(
+        mainWindow,
+        windowSettings.invisibleToRecording,
+      );
+
+      return true;
+    } catch (error) {
+      console.error('Failed to apply window settings:', error);
+      return false;
+    }
+  },
+);
+
+// Handle debug settings updates
+ipcMain.handle('update-debug-settings', async (event, debugSettings: any) => {
   try {
-    // Initializing AI pipeline with provided API key
-    
-    audioPipeline = new AudioPipeline({
-      openaiApiKey,
-      systemPrompt: systemPrompt || 'You are a helpful AI assistant. Respond naturally and concisely to what the user is saying.',
+    // Update audio capture debug settings
+    if (audioCapture && debugSettings.dumpNativeAudio !== undefined) {
+      audioCapture.setDebugSettings({ dumpNativeAudio: debugSettings.dumpNativeAudio });
+    }
+
+    // Update audio provider debug settings if pipeline exists
+    if (audioPipeline && (debugSettings.dumpOpenAIRawAudio !== undefined || debugSettings.dumpOpenAIApiAudio !== undefined)) {
+      audioPipeline.setDebugSettings({
+        dumpRawAudio: debugSettings.dumpOpenAIRawAudio,
+        dumpApiAudio: debugSettings.dumpOpenAIApiAudio
+      });
+      console.log('🔧 Updated audio provider debug settings:', debugSettings);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Failed to update debug settings:', error);
+    return { success: false, error: 'Failed to update debug settings' };
+  }
+});
+
+// Handle sending text messages to the AI
+ipcMain.handle('send-text-message', async (event, message: string) => {
+  if (!audioPipeline) {
+    return { success: false, error: 'Audio pipeline not initialized' };
+  }
+
+  try {
+    // For now, just emit the transcript event to trigger AI response
+    audioPipeline.emit('transcript.final', message);
+    return { success: true };
+  } catch (error) {
+    console.error('Failed to send text message:', error);
+    return { success: false, error: 'Failed to send message' };
+  }
+});
+
+// Removed duplicate setupOpenAIEventHandlers - now using unified handlers for all providers
+
+// Set up unified event handlers that work with all audio providers
+function setupUnifiedEventHandlers(pipeline: BaseAudioProvider): void {
+  // User transcript events
+  pipeline.on('transcript.final', (text: string) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('transcript-final', text);
+    }
+  });
+
+  // AI response events
+  pipeline.on('chat.response', (response: any) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('chat-response', response);
+    }
+  });
+
+  pipeline.on('ai.response_started', () => {
+    if (mainWindow) {
+      mainWindow.webContents.send('response-started');
+    }
+  });
+
+  pipeline.on('chat.chunk', (chunk: string) => {
+    const chunkId = Math.random().toString(36).substr(2, 5);
+    if (mainWindow) {
+      mainWindow.webContents.send('chat-chunk', { chunk, id: chunkId });
+    }
+  });
+
+  // All AI text updates now use chat.chunk for consistency
+
+  pipeline.on('ai.text_complete', (text: string) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('ai-text-complete', text);
+    }
+  });
+
+  pipeline.on('ai.audio_transcript_done', (transcript: string) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('ai-text-complete', transcript);
+    }
+  });
+
+  // Audio events for AI responses
+  pipeline.on('ai.audio_chunk', (audioBuffer: Buffer | ArrayBuffer) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('ai-audio-chunk', audioBuffer);
+    }
+  });
+
+  pipeline.on('ai.audio_done', () => {
+    if (mainWindow) {
+      mainWindow.webContents.send('ai-audio-done');
+    }
+  });
+
+  // Speech detection events
+  pipeline.on('user.speech_started', () => {
+    if (mainWindow) {
+      mainWindow.webContents.send('user-speech-started');
+    }
+  });
+
+  pipeline.on('user.speech_stopped', () => {
+    if (mainWindow) {
+      mainWindow.webContents.send('user-speech-stopped');
+    }
+  });
+
+  // Connection and error events
+  pipeline.on('stt.connected', () => {
+    if (mainWindow) {
+      mainWindow.webContents.send('stt.connected');
+    }
+  });
+
+  pipeline.on('stt.closed', (code: number, reason: string) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('stt.closed', code, reason);
+    }
+  });
+
+  pipeline.on('stt.error', (error: Error) => {
+    console.error('Pipeline error:', error);
+    if (mainWindow) {
+      mainWindow.webContents.send('pipeline-error', error.message);
+    }
+  });
+
+  // Audio processing events
+  pipeline.on('audio.processed', (info: any) => {
+    // Optional: could send processing stats to renderer if needed
+  });
+
+  pipeline.on('audio.error', (error: Error) => {
+    console.error('Audio processing error:', error);
+    if (mainWindow) {
+      mainWindow.webContents.send(
+        'pipeline-error',
+        `Audio processing error: ${error.message}`,
+      );
+    }
+  });
+}
+
+// Initialize audio pipeline with API key - now supports multiple providers using unified system
+async function initializeAudioPipeline(
+  apiKey: string,
+  systemPrompt?: string,
+  provider?: 'openai' | 'gemini',
+): Promise<void> {
+  try {
+    // Get saved settings from database
+    const savedSettings = database?.getSettings();
+    const aiProvider = provider || savedSettings?.aiProvider || 'openai';
+    const vadSettings = savedSettings?.vadSettings || {
+      releaseMs: 2000,
+      holdMs: 200,
+      threshold: 0.02,
+      adaptiveNoiseFloor: true,
+    };
+    const audioSettings = savedSettings?.audioSettings || {
       bufferSizeMs: 1000,
       enableVAD: true,
-      vadThreshold: 0.05, // Raised for system audio noise floor
-      vad: {
-        enabled: true,
-        mode: 'semantic',    // Switch to semantic VAD for better system audio detection
-        threshold: 0.8,      // Higher threshold for server VAD (if switched back)
-        silenceMs: 300,      // Shorter silence duration for server VAD
-        eagerness: 'auto',   // Semantic VAD eagerness
-        interruptResponse: true // Allow interrupting AI responses
+    };
+    const geminiSettings = {
+      model: 'gemini-live-2.5-flash-preview',
+      audioArchitecture: 'half-cascade',
+      ...(savedSettings?.geminiSettings || {}),
+      responseModalities: ['TEXT'], // Force TEXT mode (override any cached setting)
+    };
+
+    console.log('🔧 Initializing unified audio provider:', {
+      provider: aiProvider,
+      vadSettings,
+      audioSettings,
+      geminiSettings: aiProvider === 'gemini' ? geminiSettings : undefined,
+      systemPrompt,
+    });
+
+    // Use unified system for ALL providers (OpenAI and Gemini)
+    const providerConfig: ProviderFactoryConfig = {
+      provider: aiProvider,
+      apiKey,
+      systemPrompt:
+        systemPrompt ||
+        'You are a helpful AI assistant. Respond naturally and concisely to what the user is saying.',
+      vadSettings: {
+        enableVAD: audioSettings.enableVAD,
+        threshold: vadSettings.threshold,
+        holdMs: vadSettings.holdMs,
+        releaseMs: vadSettings.releaseMs,
+        adaptiveNoiseFloor: vadSettings.adaptiveNoiseFloor,
       },
-      wantTranscripts: true,
-      wantText: true,
-      voice: 'alloy',
-      transcriptionModel: 'whisper-1' // More reliable with system audio than gpt-4o-transcribe
-    });
-    
-    // Set up pipeline event handlers for new Realtime Conversation structure
-    
-    // User transcript events (what user said)
-    audioPipeline.on('transcript.final', (text: string) => {
-      if (mainWindow) {
-        mainWindow.webContents.send('transcript-final', text);
-      }
-    });
-    
-    // AI response events
-    audioPipeline.on('chat.response', (response: any) => {
-      if (mainWindow) {
-        mainWindow.webContents.send('chat-response', response);
-      }
-    });
-    
-    audioPipeline.on('chat.chunk', (chunk: string) => {
-      // Sending chat chunk to renderer
-      if (mainWindow) {
-        mainWindow.webContents.send('chat-chunk', chunk);
-      }
-    });
-    
-    // Audio events for AI responses
-    audioPipeline.on('ai.audio_chunk', (audioBuffer: Buffer) => {
-      if (mainWindow) {
-        mainWindow.webContents.send('ai-audio-chunk', audioBuffer);
-      }
-    });
-    
-    audioPipeline.on('ai.audio_done', () => {
-      if (mainWindow) {
-        mainWindow.webContents.send('ai-audio-done');
-      }
-    });
-    
-    // AI audio transcript events (text of what AI is saying)
-    audioPipeline.on('ai.audio_transcript_delta', (chunk: string) => {
-      if (mainWindow) {
-        mainWindow.webContents.send('ai-text-update', chunk);
-      }
-    });
-    
-    audioPipeline.on('ai.audio_transcript_done', (transcript: string) => {
-      if (mainWindow) {
-        mainWindow.webContents.send('ai-text-complete', transcript);
-      }
-    });
-    
-    // Speech detection events
-    audioPipeline.on('user.speech_started', () => {
-      if (mainWindow) {
-        mainWindow.webContents.send('user-speech-started');
-      }
-    });
-    
-    audioPipeline.on('user.speech_stopped', () => {
-      if (mainWindow) {
-        mainWindow.webContents.send('user-speech-stopped');
-      }
-    });
-    
-    // Connection and error events
-    audioPipeline.on('stt.connected', () => {
-      if (mainWindow) {
-        mainWindow.webContents.send('stt.connected');
-      }
-    });
-    
-    audioPipeline.on('stt.closed', (code: number, reason: string) => {
-      if (mainWindow) {
-        mainWindow.webContents.send('stt.closed', code, reason);
-      }
-    });
-    
-    audioPipeline.on('stt.error', (error: Error) => {
-      console.error('Pipeline STT error:', error);
-      if (mainWindow) {
-        mainWindow.webContents.send('pipeline-error', error.message);
-      }
-    });
-    
-    // Connect audio capture to pipeline for embedded WebRTC VAD
+      audioSettings,
+      providerSpecific: aiProvider === 'gemini' ? geminiSettings : {},
+    };
+
+    const validation = AudioProviderFactory.validateConfig(providerConfig);
+    if (!validation.valid) {
+      throw new Error(
+        `Invalid provider configuration: ${validation.errors.join(', ')}`,
+      );
+    }
+
+    audioPipeline = AudioProviderFactory.createProvider(providerConfig);
+
     if (audioCapture) {
       audioPipeline.setAudioCapture(audioCapture);
     }
-    
-    // AI pipeline initialized successfully
+
+    setupUnifiedEventHandlers(audioPipeline);
+    await audioPipeline.initialize();
+
+    // Apply debug settings if they exist
+    if (savedSettings?.debugSettings) {
+      audioPipeline.setDebugSettings({
+        dumpRawAudio: savedSettings.debugSettings.dumpOpenAIRawAudio,
+        dumpApiAudio: savedSettings.debugSettings.dumpOpenAIApiAudio
+      });
+      console.log('🔧 Applied debug settings to audio provider:', savedSettings.debugSettings);
+    }
+
+    console.log(
+      `✅ ${aiProvider.toUpperCase()} audio provider initialized successfully (unified system)`,
+    );
+
+    // Original AudioPipeline is still available at src/audio/pipeline.ts as reference/fallback
   } catch (error) {
     console.error('❌ Failed to initialize AI pipeline:', error);
     audioPipeline = null;
@@ -374,19 +652,26 @@ async function initializeAudioPipeline(openaiApiKey: string, systemPrompt?: stri
 }
 
 // Platform-specific window invisibility
-async function setWindowInvisibleToRecording(window: BrowserWindow, invisible: boolean) {
+async function setWindowInvisibleToRecording(
+  window: BrowserWindow,
+  invisible: boolean,
+) {
   const platform = process.platform;
-  
+
   if (platform === 'win32') {
     // Windows: Use SetWindowDisplayAffinity
     const { exec } = require('child_process');
     const windowId = window.getNativeWindowHandle().readBigUInt64LE();
-    
+
     if (invisible) {
       // WDA_MONITOR = 0x00000001 - Excludes window from capture
-      exec(`powershell -Command "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32 { [DllImport(\\"user32.dll\\")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity); }'; [Win32]::SetWindowDisplayAffinity(${windowId}, 1)"`);
+      exec(
+        `powershell -Command "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32 { [DllImport(\\"user32.dll\\")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity); }'; [Win32]::SetWindowDisplayAffinity(${windowId}, 1)"`,
+      );
     } else {
-      exec(`powershell -Command "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32 { [DllImport(\\"user32.dll\\")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity); }'; [Win32]::SetWindowDisplayAffinity(${windowId}, 0)"`);
+      exec(
+        `powershell -Command "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32 { [DllImport(\\"user32.dll\\")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity); }'; [Win32]::SetWindowDisplayAffinity(${windowId}, 0)"`,
+      );
     }
   } else if (platform === 'darwin') {
     // macOS: Use window level manipulation for screen capture exclusion
@@ -398,19 +683,21 @@ async function setWindowInvisibleToRecording(window: BrowserWindow, invisible: b
           (window as any).setContentProtection(true);
           // Applied content protection to exclude window from capture
         } catch (e) {
-          console.log('⚠️ setContentProtection not available, using fallback method');
+          console.log(
+            '⚠️ setContentProtection not available, using fallback method',
+          );
         }
       }
-      
+
       // Set window to screen-saver level (typically excluded from capture)
       window.setAlwaysOnTop(true, 'screen-saver', 1);
       window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-      
+
       // IMPORTANT: On macOS, the most reliable way to hide from screen capture
       // is to use a private window level that's excluded from capture
       try {
         const { exec } = require('child_process');
-        
+
         // Use Objective-C runtime to set private window properties
         // This sets the window to a special level that's excluded from screen capture
         const objcScript = `
@@ -456,19 +743,21 @@ async function setWindowInvisibleToRecording(window: BrowserWindow, invisible: b
             return 0;
           }
         `;
-        
+
         // Write to a temporary file and compile/run it
         const fs = require('fs');
         const path = require('path');
         const tmpFile = path.join(app.getPath('temp'), 'hide-window.m');
         fs.writeFileSync(tmpFile, objcScript);
-        
-        exec(`clang -framework Cocoa -framework QuartzCore -framework ApplicationServices -x objective-c ${tmpFile} -o ${tmpFile}.out && ${tmpFile}.out`, (error: any) => {
-          if (error) {
-            console.warn('Failed to set macOS window level:', error);
-            
-            // Fallback: Try using accessibility APIs
-            const fallbackScript = `
+
+        exec(
+          `clang -framework Cocoa -framework QuartzCore -framework ApplicationServices -x objective-c ${tmpFile} -o ${tmpFile}.out && ${tmpFile}.out`,
+          (error: any) => {
+            if (error) {
+              console.warn('Failed to set macOS window level:', error);
+
+              // Fallback: Try using accessibility APIs
+              const fallbackScript = `
               tell application "System Events"
                 tell process "${app.getName()}"
                   try
@@ -477,34 +766,40 @@ async function setWindowInvisibleToRecording(window: BrowserWindow, invisible: b
                 end tell
               end tell
             `;
-            
-            exec(`osascript -e '${fallbackScript.replace(/'/g, "\\'")}'`);
-          } else {
-            // Successfully applied macOS screen capture exclusion
-          }
-          
-          // Clean up temp files
-          try {
-            fs.unlinkSync(tmpFile);
-            fs.unlinkSync(`${tmpFile}.out`);
-          } catch (e) {}
-        });
+
+              exec(`osascript -e '${fallbackScript.replace(/'/g, "\\'")}'`);
+            } else {
+              // Successfully applied macOS screen capture exclusion
+            }
+
+            // Clean up temp files
+            try {
+              fs.unlinkSync(tmpFile);
+              fs.unlinkSync(`${tmpFile}.out`);
+            } catch (e) {}
+          },
+        );
       } catch (error) {
-        console.warn('Failed to apply macOS screen recording exclusion:', error);
+        console.warn(
+          'Failed to apply macOS screen recording exclusion:',
+          error,
+        );
       }
     } else {
       // Restore normal visibility
       try {
         (window as any).setContentProtection(false);
       } catch (e) {}
-      
+
       window.setAlwaysOnTop(false);
       window.setVisibleOnAllWorkspaces(false);
-      
+
       // Reset to normal window level
       try {
         const { exec } = require('child_process');
-        exec(`osascript -e 'tell application "System Events" to tell process "${app.getName()}" to set value of attribute "AXWindowLevel" of window 1 to 0'`);
+        exec(
+          `osascript -e 'tell application "System Events" to tell process "${app.getName()}" to set value of attribute "AXWindowLevel" of window 1 to 0'`,
+        );
       } catch (error) {}
     }
   } else if (platform === 'linux') {
@@ -571,12 +866,14 @@ const createWindow = async () => {
     transparent: false,
     opacity: settings?.windowOpacity || 1.0,
     // macOS specific settings for better always-on-top behavior
-    ...(process.platform === 'darwin' ? {
-      visibleOnAllWorkspaces: true,
-      fullscreenWindowTitle: true,
-      hasShadow: true,
-      roundedCorners: true,
-    } : {}),
+    ...(process.platform === 'darwin'
+      ? {
+          visibleOnAllWorkspaces: true,
+          fullscreenWindowTitle: true,
+          hasShadow: true,
+          roundedCorners: true,
+        }
+      : {}),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -592,16 +889,16 @@ const createWindow = async () => {
     if (!mainWindow) {
       throw new Error('"mainWindow" is not defined');
     }
-    
+
     // Initialize privacy manager
     privacyManager = new PrivacyManager();
     privacyManager.setWindow(mainWindow);
-    
+
     // Apply initial window settings
     if (settings?.invisibleToRecording) {
       setWindowInvisibleToRecording(mainWindow, true);
     }
-    
+
     if (process.env.START_MINIMIZED) {
       mainWindow.minimize();
     } else {
@@ -666,90 +963,191 @@ app
     if (process.env.NODE_ENV === 'development') {
       app.setName('AI Audio Assistant');
     }
-    
+
     await createWindow();
-    
+
     // Initialize audio capture
     try {
+      console.log('🚀 [Init] Starting complete app initialization...');
       // Initialize audio capture
-      
+
       // Request permissions on macOS
       if (process.platform === 'darwin') {
         const { systemPreferences } = require('electron');
-        
+
         // Check and request microphone permission
         const micStatus = systemPreferences.getMediaAccessStatus('microphone');
         // Microphone permission status checked
         if (micStatus !== 'granted') {
-          const micGranted = await systemPreferences.askForMediaAccess('microphone');
+          const micGranted =
+            await systemPreferences.askForMediaAccess('microphone');
           // Microphone permission granted
         }
-        
+
         // Check screen recording permission (macOS 10.15+)
         try {
           const screenStatus = systemPreferences.getMediaAccessStatus('screen');
           // Screen recording permission status checked
         } catch (err) {
-          console.log('Screen recording permission check not available on this macOS version');
+          console.log(
+            'Screen recording permission check not available on this macOS version',
+          );
         }
-        
+
         // Trigger screen recording permission by attempting screen capture
         // Trigger screen recording permission
         const { desktopCapturer } = require('electron');
         try {
-          const sources = await desktopCapturer.getSources({ 
-            types: ['screen'],
-            thumbnailSize: { width: 1, height: 1 }
-          });
-          // Screen recording permission triggered
-          
-          // Also try to get audio sources to trigger audio capture permission
-          const audioSources = await desktopCapturer.getSources({ 
+          const sources = await desktopCapturer.getSources({
             types: ['screen'],
             thumbnailSize: { width: 1, height: 1 },
-            fetchWindowIcons: false
+          });
+          // Screen recording permission triggered
+
+          // Also try to get audio sources to trigger audio capture permission
+          const audioSources = await desktopCapturer.getSources({
+            types: ['screen'],
+            thumbnailSize: { width: 1, height: 1 },
+            fetchWindowIcons: false,
           });
           // Audio sources checked
         } catch (err) {
-          console.log('Screen recording permission prompt triggered via error:', err);
+          console.log(
+            'Screen recording permission prompt triggered via error:',
+            err,
+          );
         }
-        
+
         // Give user time to grant permission
         // Wait for permission grant
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
-      
+
+      // Notify renderer about initialization progress
+      console.log('🔧 [Init] Starting audio capture initialization...');
+      mainWindow?.webContents.send('initialization-progress', {
+        step: 'audio-capture',
+        status: 'initializing',
+        message: 'Initializing audio capture...'
+      });
+
       audioCapture = new AudioCapture();
-      
+
       // Initialize WebRTC VAD embedded in the audio capture module
       // Mode 3 is more aggressive (less false positives) for system audio
-      if (audioCapture.createVAD(48000, 3)) {
-        // WebRTC VAD initialized with mode 3
-      } else {
-        console.warn('⚠️ WebRTC VAD initialization failed - using simple VAD fallback');
-      }
-      
-      // Initialize AI pipeline with settings if API key is available
+      const vadAlreadyInitialized = audioCapture.isVADInitialized();
+      console.log(
+        `🔍 [Debug] VAD already initialized: ${vadAlreadyInitialized}`,
+      );
+
+      // Initialize VAD with settings-based aggressiveness
       const settings = database?.getSettings();
-      if (settings?.openaiApiKey) {
+      const vadAggressiveness = settings?.vadSettings?.aggressiveness ?? 3;
+      
+      if (!vadAlreadyInitialized && audioCapture.createVAD(48000, vadAggressiveness)) {
+        // VAD creation success is already logged in AudioCapture.createVAD()
+
+        // Disable native noise gate to allow VAD to process all audio (including silence)
+        audioCapture.setNoiseGateThreshold(0.0);
+        console.log(
+          `🔧 Native noise gate disabled - VAD will process all audio including silence (aggressiveness: ${vadAggressiveness})`,
+        );
+        
+        console.log('✅ [Init] Audio capture initialization completed');
+        mainWindow?.webContents.send('initialization-progress', {
+          step: 'audio-capture',
+          status: 'completed',
+          message: 'Audio capture initialized successfully'
+        });
+      } else {
+        console.warn(
+          '⚠️ WebRTC VAD initialization failed - using simple VAD fallback',
+        );
+        
+        console.log('✅ [Init] Audio capture initialization completed (fallback mode)');
+        mainWindow?.webContents.send('initialization-progress', {
+          step: 'audio-capture',
+          status: 'completed',
+          message: 'Audio capture initialized (fallback mode)'
+        });
+      }
+
+      // Initialize AI pipeline with settings if API key is available  
+      const aiProvider = settings?.aiProvider || 'openai';
+      const apiKey =
+        aiProvider === 'gemini'
+          ? settings?.geminiApiKey
+          : settings?.openaiApiKey;
+
+      // Apply debug settings on startup
+      if (settings?.debugSettings) {
+        audioCapture.setDebugSettings(settings.debugSettings);
+        console.log('🔧 Applied debug settings on startup:', settings.debugSettings);
+      }
+
+      if (apiKey) {
+        console.log(`🔧 [Init] Starting ${aiProvider.toUpperCase()} pipeline initialization...`);
+        mainWindow?.webContents.send('initialization-progress', {
+          step: 'ai-pipeline',
+          status: 'initializing',
+          message: `Initializing ${aiProvider.toUpperCase()} pipeline...`
+        });
+        
         try {
-          await initializeAudioPipeline(settings.openaiApiKey, settings.systemPrompt);
+          await initializeAudioPipeline(
+            apiKey,
+            settings?.systemPrompt,
+            aiProvider,
+          );
+          
+          console.log(`✅ [Init] ${aiProvider.toUpperCase()} pipeline initialization completed`);
+          mainWindow?.webContents.send('initialization-progress', {
+            step: 'ai-pipeline',
+            status: 'completed',
+            message: `${aiProvider.toUpperCase()} pipeline initialized successfully`
+          });
         } catch (error) {
-          console.error('Failed to initialize AI pipeline during startup:', error);
+          console.error(
+            'Failed to initialize AI pipeline during startup:',
+            error,
+          );
+          
+          console.error(`❌ [Init] ${aiProvider.toUpperCase()} pipeline initialization failed:`, error);
+          mainWindow?.webContents.send('initialization-progress', {
+            step: 'ai-pipeline',
+            status: 'error',
+            message: `Failed to initialize ${aiProvider.toUpperCase()} pipeline`
+          });
         }
       } else {
-        console.log('No OpenAI API key found - AI pipeline disabled (can be enabled in settings)');
+        console.log(
+          `No ${aiProvider === 'gemini' ? 'Gemini' : 'OpenAI'} API key found - AI pipeline disabled (can be enabled in settings)`,
+        );
+        
+        console.log('⏭️ [Init] AI pipeline skipped - no API key');
+        mainWindow?.webContents.send('initialization-progress', {
+          step: 'ai-pipeline',
+          status: 'skipped',
+          message: `No API key found - please configure in settings`
+        });
       }
-      
+
+      // Signal that initialization is complete
+      console.log('🎉 [Init] All initialization completed successfully');
+      mainWindow?.webContents.send('initialization-progress', {
+        step: 'complete',
+        status: 'completed',
+        message: 'Initialization complete'
+      });
+
       // Set up audio event handlers
       audioCapture.on('audio', (sample) => {
-        audioEventCount++;
         // Audio event received
-        
+
         if (mainWindow) {
           // Send raw audio data to renderer for visualization
           const volumeLevel = audioCapture!.getVolumeLevel();
-          
+
           // Calculate frequency data for better visualization using correct data type
           const audioData = new Int16Array(
             sample.data.buffer,
@@ -758,35 +1156,31 @@ app
           );
           const fftSize = 128;
           const frequencyData = new Float32Array(fftSize);
-          
+
           // Simple frequency analysis for visualization (normalize int16 to float)
           for (let i = 0; i < fftSize && i < audioData.length; i++) {
             frequencyData[i] = Math.abs(audioData[i]) / 32768.0;
           }
-          
+
           mainWindow.webContents.send('audio-data', {
             volume: volumeLevel,
             timestamp: sample.timestamp,
             format: sample.format,
             frequencyData: Array.from(frequencyData),
-            rawData: sample.data // Send raw data for playback
           });
         }
-        
+
         // Send float32 audio to AI pipeline for processing
         if (audioPipeline && audioPipeline.isReady() && audioCapture) {
           // Get the latest float32 audio chunk from native capture (destructive read)
           const float32Data = audioCapture.getBufferedFloat32Audio() as any;
           if (float32Data && float32Data.length > 0) {
-            // Keep a copy for replay before sending to pipeline
-            recordingBuffer.push(float32Data.slice()); // Clone the array
-            
             // Send to AI pipeline
             audioPipeline.processAudioChunk(float32Data);
           }
         }
       });
-      
+
       // Check if audio capture is supported
       const isSupported = await AudioCapture.isAudioCaptureSupported();
       if (isSupported) {
@@ -794,12 +1188,19 @@ app
       } else {
         console.log('Native audio capture not available - using mock mode');
       }
-      
+
       // Audio capture initialized successfully
     } catch (error) {
-      console.error('Failed to initialize audio capture:', error);
+      console.error('💥 [Init] CRITICAL: Failed to initialize app:', error);
+      
+      // Send error to renderer
+      mainWindow?.webContents.send('initialization-progress', {
+        step: 'error',
+        status: 'error',
+        message: `Initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      });
     }
-    
+
     app.on('activate', () => {
       // On macOS it's common to re-create a window in the app when the
       // dock icon is clicked and there are no other windows open.

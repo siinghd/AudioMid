@@ -41,11 +41,13 @@ public:
     void SetVolumeLevel(float level);
     void SetLastError(const std::string& error);
     void OnAudioData(const uint8_t* data, size_t length);
+    void SetNoiseGateThreshold(float threshold) override;
 
 private:
     SCStream* stream_;
     AudioStreamDelegate* streamDelegate_;
     std::atomic<bool> shouldStop_;
+    float noiseGateThreshold_;
     
     void CleanupResources();
 };

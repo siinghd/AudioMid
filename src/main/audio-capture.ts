@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import fs from 'fs';
 import path from 'path';
 
 export interface AudioFormat {
@@ -6,6 +7,10 @@ export interface AudioFormat {
   channels: number;
   bitsPerSample: number;
   bytesPerFrame: number;
+  blockAlign?: number;
+  isFloat?: boolean;
+  isNonInterleaved?: boolean;
+  formatFlags?: number;
 }
 
 export interface AudioSample {
@@ -33,6 +38,29 @@ export class AudioCapture extends EventEmitter {
   private nativeCapture: any;
   private isInitialized: boolean = false;
   private vadInitialized: boolean = false;
+  
+  // ────────────────────────────────────────────
+  // Audio chunk storage for playback
+  private audioChunks: AudioSample[] = [];
+  private isRecordingChunks: boolean = false;
+
+  // ────────────────────────────────────────────
+  // Debugging: continuous native audio dump when flag set
+  private nativeDumpStream: fs.WriteStream | null = null;
+  private dumpNativeAudio: boolean = false;
+  private startNativeDump(): void {
+    if (this.dumpNativeAudio && !this.nativeDumpStream) {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const file = path.join(process.cwd(), `native48-${ts}.pcm`);
+      try {
+        this.nativeDumpStream = fs.createWriteStream(file);
+        console.log(`🎧 [NativeDump] streaming native audio to ${file}`);
+        console.log(`   Play with: ffplay -f f32le -ar 48000 -ac 2 "${file}"`);
+      } catch (err) {
+        console.warn('❌ Failed to open native dump file:', err);
+      }
+    }
+  }
 
   constructor() {
     super();
@@ -90,7 +118,20 @@ export class AudioCapture extends EventEmitter {
 
       // Set up the audio callback
       console.log('Setting up audio callback...');
+
+      // initialise dump stream if needed
+      this.startNativeDump();
+
       this.nativeCapture.setAudioCallback((sample: AudioSample) => {
+        if (this.nativeDumpStream) {
+          this.nativeDumpStream.write(sample.data);
+        }
+        
+        // Store audio chunks for playback if recording
+        if (this.isRecordingChunks) {
+          this.audioChunks.push(sample);
+        }
+        
         this.emit('audio', sample);
       });
       console.log('Audio callback set successfully');
@@ -143,12 +184,15 @@ export class AudioCapture extends EventEmitter {
         console.log('🔄 Testing audio format conversion pipeline...');
       } else {
         const error = this.nativeCapture.getLastError();
-        console.error('❌ Failed to start real audio capture - DETAILED ERROR:', error);
+        console.error(
+          '❌ Failed to start real audio capture - DETAILED ERROR:',
+          error,
+        );
         console.error('📝 Full error context:', {
           error: error,
           isInitialized: this.isInitialized,
           deviceCount: this.getAvailableDevices().length,
-          format: this.getFormat()
+          format: this.getFormat(),
         });
 
         // Even if we can't start due to permissions, let's verify the format conversion would work
@@ -176,6 +220,11 @@ export class AudioCapture extends EventEmitter {
       const success = this.nativeCapture.stop();
       if (success) {
         console.log('Audio capture stopped successfully');
+        if (this.nativeDumpStream) {
+          this.nativeDumpStream.end();
+          console.log('🎧 [NativeDump] file closed');
+          this.nativeDumpStream = null;
+        }
       }
       return success;
     } catch (error) {
@@ -361,8 +410,56 @@ export class AudioCapture extends EventEmitter {
     }
   }
 
+  public setNoiseGateThreshold(threshold: number): boolean {
+    if (!this.isInitialized) {
+      return false;
+    }
+
+    try {
+      return this.nativeCapture.setNoiseGateThreshold(threshold);
+    } catch (error) {
+      console.error('Error setting noise gate threshold:', error);
+      return false;
+    }
+  }
+
   public isVADInitialized(): boolean {
     return this.vadInitialized;
+  }
+
+  // Debug settings methods
+  public setDebugSettings(settings: { dumpNativeAudio?: boolean }): void {
+    if (settings.dumpNativeAudio !== undefined) {
+      this.dumpNativeAudio = settings.dumpNativeAudio;
+      
+      if (this.dumpNativeAudio && this.isCapturing()) {
+        // Start dumping if enabled and capturing
+        this.startNativeDump();
+      } else if (!this.dumpNativeAudio && this.nativeDumpStream) {
+        // Stop dumping if disabled
+        this.nativeDumpStream.end();
+        console.log('🎧 [NativeDump] stopped audio dump');
+        this.nativeDumpStream = null;
+      }
+    }
+  }
+
+  // Audio chunk recording methods for playback
+  public startRecordingChunks(): void {
+    this.audioChunks = [];
+    this.isRecordingChunks = true;
+  }
+
+  public stopRecordingChunks(): void {
+    this.isRecordingChunks = false;
+  }
+
+  public getRecordedAudioChunks(): AudioSample[] {
+    return [...this.audioChunks];
+  }
+
+  public clearRecordedAudioChunks(): void {
+    this.audioChunks = [];
   }
 
   // Test format conversion capabilities
@@ -440,6 +537,11 @@ export class AudioCapture extends EventEmitter {
         },
       };
 
+      // Store audio chunks for playback if recording
+      if (this.isRecordingChunks) {
+        this.audioChunks.push(mockSample);
+      }
+      
       this.emit('audio', mockSample);
     }, 100); // 100ms intervals
   }

@@ -348,27 +348,12 @@ export default class AudioPipeline extends EventEmitter {
             }
           }
 
-          // Debug: Log frame results
-          if (this.stats.audioChunksProcessed % 50 === 0) {
-            console.log(
-              `🔍 [VAD Debug] Processed ${framesProcessed} frames: ${speechFrames} speech, ${framesProcessed - speechFrames} silence`,
-            );
-          }
 
-          // Log VAD processing every 100th chunk
-          if (this.stats.audioChunksProcessed % 100 === 0) {
-            console.log(
-              `🎤 [WebRTC VAD] Processed ${framesProcessed} frames, speech: ${speech}`,
-            );
-          }
         } catch (error) {
           console.warn('WebRTC VAD error, falling back to RMS:', error);
           speech = this.hasVoiceActivityRMS(float32Data);
         }
       } else {
-        if (this.stats.audioChunksProcessed % 100 === 0) {
-          console.log('⚠️ Using RMS VAD fallback - WebRTC VAD not initialized');
-        }
         speech = this.hasVoiceActivityRMS(float32Data);
       }
 
@@ -394,10 +379,6 @@ export default class AudioPipeline extends EventEmitter {
           !this.speaking &&
           this.voicedFrames * this.VAD_FRAME_MS >= this.HOLD_MS
         ) {
-          console.log(
-            `🎤 [WebRTC VAD] Speech STARTED (held for ${this.voicedFrames * this.VAD_FRAME_MS}ms)`,
-          );
-          console.log(`   📊 Noise floor: ${this.noiseFloor.toFixed(1)} dBFS`);
           this.speaking = true;
           this.emit('user.speech_started');
         }
@@ -409,12 +390,6 @@ export default class AudioPipeline extends EventEmitter {
           this.speaking &&
           this.silentFrames * this.VAD_FRAME_MS >= this.RELEASE_MS
         ) {
-          console.log(
-            `🛑 [WebRTC VAD] Speech STOPPED after ${this.silentFrames * this.VAD_FRAME_MS}ms silence`,
-          );
-          console.log(
-            `   📊 Total bytes sent: ${this.bytesSent}, voiced frames: ${this.voicedFrames}`,
-          );
 
           this.speaking = false;
           
@@ -424,7 +399,6 @@ export default class AudioPipeline extends EventEmitter {
             // Close the turn
             this.realtimeConversation.closeTurn();
           } else {
-            console.log(`   ⚠️ Not closing turn - insufficient audio (${this.bytesSent} bytes < 9600 bytes)`);
           }
           
           this.voicedFrames = 0;
@@ -500,17 +474,7 @@ export default class AudioPipeline extends EventEmitter {
     // Only change voice state after debounce
     const hasVoice = this.voiceFrames >= this.VOICE_DEBOUNCE_FRAMES;
 
-    // Log VAD state changes or periodically during speech
-    this.vadLogCounter++;
-    if (
-      hasVoice !== this.lastVadState ||
-      (hasVoice && this.vadLogCounter % 100 === 0)
-    ) {
-      console.log(
-        `🎙️ [Local VAD] RMS: ${rms.toFixed(4)} (smoothed: ${smoothedRms.toFixed(4)}), Threshold: ${this.vadThreshold}, Has Voice: ${hasVoice}`,
-      );
-      this.lastVadState = hasVoice;
-    }
+    this.lastVadState = hasVoice;
 
     return hasVoice;
   }
@@ -637,12 +601,6 @@ export default class AudioPipeline extends EventEmitter {
       // Only check for silence timeout if we're currently speaking
       // and not during AI responses or other audio playback
       if (this.speaking && this.isRunning && timeSinceLastAudio >= this.RELEASE_MS) {
-        console.log(
-          `🛑 [Silence Timeout] No audio received for ${timeSinceLastAudio}ms - stopping speech`,
-        );
-        console.log(
-          `   📊 Total bytes sent: ${this.bytesSent}, voiced frames: ${this.voicedFrames}`,
-        );
 
         this.speaking = false;
         
@@ -651,7 +609,6 @@ export default class AudioPipeline extends EventEmitter {
           // Close the turn
           this.realtimeConversation.closeTurn();
         } else {
-          console.log(`   ⚠️ Not closing turn - insufficient audio (${this.bytesSent} bytes < 9600 bytes)`);
         }
         
         this.voicedFrames = 0;

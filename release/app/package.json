@@ -1,11 +1,11 @@
 {
-  "name": "ai-audio-assistant",
+  "name": "audiomid",
   "version": "1.0.0",
-  "description": "Electron desktop app that captures system audio and processes it with GPT-4o Realtime API",
+  "description": "Minimalist AI audio assistant that captures system audio with real-time processing",
   "license": "MIT",
   "author": {
-    "name": "AI Audio Assistant",
-    "email": "noreply@example.com"
+    "name": "Harpreet Singh",
+    "url": "https://github.com/siinghd"
   },
   "main": "./dist/main/main.js",
   "scripts": {

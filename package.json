@@ -1,6 +1,6 @@
 {
-  "name": "ai-audio-assistant",
-  "description": "Electron desktop app that captures system audio and processes it with GPT-4o Realtime API",
+  "name": "audiomid",
+  "description": "Minimalist AI audio assistant that captures system audio with real-time processing",
   "keywords": [
     "electron",
     "audio-capture",
@@ -11,46 +11,38 @@
     "typescript",
     "tailwind"
   ],
-  "homepage": "https://github.com/electron-react-boilerplate/electron-react-boilerplate#readme",
+  "homepage": "https://github.com/siinghd/AudioMid#readme",
   "bugs": {
-    "url": "https://github.com/electron-react-boilerplate/electron-react-boilerplate/issues"
+    "url": "https://github.com/siinghd/AudioMid/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/electron-react-boilerplate/electron-react-boilerplate.git"
+    "url": "git+https://github.com/siinghd/AudioMid.git"
   },
   "license": "MIT",
   "author": {
-    "name": "Electron React Boilerplate Maintainers",
-    "email": "electronreactboilerplate@gmail.com",
-    "url": "https://electron-react-boilerplate.js.org"
+    "name": "Harpreet Singh",
+    "url": "https://github.com/siinghd"
   },
-  "contributors": [
-    {
-      "name": "Amila Welihinda",
-      "email": "amilajack@gmail.com",
-      "url": "https://github.com/amilajack"
-    }
-  ],
   "main": "./.erb/dll/main.bundle.dev.js",
   "scripts": {
-    "build": "concurrently \"pnpm run build:main\" \"pnpm run build:renderer\"",
+    "build": "concurrently \"yarn run build:main\" \"yarn run build:renderer\"",
     "build:dll": "cross-env NODE_ENV=development TS_NODE_TRANSPILE_ONLY=true NODE_OPTIONS=\"-r ts-node/register --no-warnings\" webpack --config ./.erb/configs/webpack.config.renderer.dev.dll.ts",
     "build:main": "cross-env NODE_ENV=production TS_NODE_TRANSPILE_ONLY=true NODE_OPTIONS=\"-r ts-node/register --no-warnings\" webpack --config ./.erb/configs/webpack.config.main.prod.ts",
     "build:renderer": "cross-env NODE_ENV=production TS_NODE_TRANSPILE_ONLY=true NODE_OPTIONS=\"-r ts-node/register --no-warnings\" webpack --config ./.erb/configs/webpack.config.renderer.prod.ts",
-    "postinstall": "ts-node .erb/scripts/check-native-dep.js && electron-builder install-app-deps && pnpm run build:dll",
+    "postinstall": "ts-node .erb/scripts/check-native-dep.js && electron-builder install-app-deps && yarn run build:dll",
     "lint": "cross-env NODE_ENV=development eslint . --ext .js,.jsx,.ts,.tsx",
     "lint:fix": "cross-env NODE_ENV=development eslint . --ext .js,.jsx,.ts,.tsx --fix",
-    "package": "ts-node ./.erb/scripts/clean.js dist && pnpm run build && electron-builder build --publish never && pnpm run build:dll",
+    "package": "ts-node ./.erb/scripts/clean.js dist && yarn run build && electron-builder build --publish never && yarn run build:dll",
     "rebuild": "electron-rebuild --parallel --types prod,dev,optional --module-dir release/app",
     "prestart": "cross-env NODE_ENV=development TS_NODE_TRANSPILE_ONLY=true NODE_OPTIONS=\"-r ts-node/register --no-warnings\" webpack --config ./.erb/configs/webpack.config.main.dev.ts",
-    "start": "ts-node ./.erb/scripts/check-port-in-use.js && pnpm run prestart && pnpm run start:renderer",
+    "start": "ts-node ./.erb/scripts/check-port-in-use.js && yarn run prestart && yarn run start:renderer",
     "start:main": "concurrently -k -P \"cross-env NODE_ENV=development TS_NODE_TRANSPILE_ONLY=true webpack --watch --config ./.erb/configs/webpack.config.main.dev.ts\" \"electronmon . -- {@}\" --",
     "start:preload": "cross-env NODE_ENV=development TS_NODE_TRANSPILE_ONLY=true NODE_OPTIONS=\"-r ts-node/register --no-warnings\" webpack --config ./.erb/configs/webpack.config.preload.dev.ts",
     "start:renderer": "cross-env NODE_ENV=development TS_NODE_TRANSPILE_ONLY=true NODE_OPTIONS=\"-r ts-node/register --no-warnings\" webpack serve --config ./.erb/configs/webpack.config.renderer.dev.ts",
-    "build:native": "cmake-js compile --runtime=electron --runtime-version=35.6.0 --arch=arm64",
-    "dev": "pnpm start",
-    "dist": "pnpm package",
+    "build:native": "cmake-js compile --runtime=electron --runtime-version=37.2.0 --arch=arm64",
+    "dev": "yarn start",
+    "dist": "yarn package",
     "test": "jest"
   },
   "browserslist": [
@@ -103,9 +95,10 @@
     }
   },
   "dependencies": {
-    "@electron/notarize": "^3.0.0",
+    "@electron/notarize": "^2.3.2",
+    "@google/genai": "^1.8.0",
+    "@google/generative-ai": "^0.24.1",
     "@tailwindcss/typography": "^0.5.16",
-    "@types/react-syntax-highlighter": "^15.5.13",
     "electron-debug": "^4.1.0",
     "electron-log": "^5.3.2",
     "electron-updater": "^6.3.9",
@@ -117,7 +110,6 @@
     "react-router-dom": "^7.3.0",
     "react-syntax-highlighter": "^15.6.1",
     "remark-gfm": "^4.0.1",
-    "remark-highlight.js": "^8.0.0",
     "source-map-support": "^0.5.21",
     "wasm-audio-resampler": "^2.0.0"
   },
@@ -133,6 +125,7 @@
     "@types/node": "22.13.10",
     "@types/react": "^19.0.11",
     "@types/react-dom": "^19.0.4",
+    "@types/react-syntax-highlighter": "^15.5.13",
     "@types/react-test-renderer": "^19.0.0",
     "@types/webpack-bundle-analyzer": "^4.7.0",
     "@types/ws": "^8.5.14",
@@ -148,7 +141,7 @@
     "css-loader": "^7.1.2",
     "css-minimizer-webpack-plugin": "^7.0.2",
     "detect-port": "^2.1.0",
-    "electron": "^35.0.2",
+    "electron": "^37.2.0",
     "electron-builder": "^25.1.8",
     "electron-devtools-installer": "^4.0.0",
     "electronmon": "^2.0.3",
@@ -195,8 +188,8 @@
     "webpack-merge": "^6.0.1"
   },
   "build": {
-    "productName": "AI Audio Assistant",
-    "appId": "com.ai-audio-assistant.app",
+    "productName": "AudioMind",
+    "appId": "com.audiomind.app",
     "asar": true,
     "asarUnpack": "**\\*.{node,dll}",
     "files": [
@@ -260,12 +253,9 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "electron-react-boilerplate",
-      "repo": "electron-react-boilerplate"
+      "owner": "siinghd",
+      "repo": "AudioMid"
     }
-  },
-  "collective": {
-    "url": "https://opencollective.com/electron-react-boilerplate-594"
   },
   "devEngines": {
     "runtime": {

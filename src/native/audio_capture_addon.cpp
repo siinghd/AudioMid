@@ -25,6 +25,7 @@ private:
     Napi::Value SetDevice(const Napi::CallbackInfo& info);
     Napi::Value GetVolumeLevel(const Napi::CallbackInfo& info);
     Napi::Value GetLastError(const Napi::CallbackInfo& info);
+    Napi::Value SetNoiseGateThreshold(const Napi::CallbackInfo& info);
     Napi::Value SetAudioCallback(const Napi::CallbackInfo& info);
     Napi::Value GetBufferedAudio(const Napi::CallbackInfo& info);
     Napi::Value GetBufferedFloat32Audio(const Napi::CallbackInfo& info);
@@ -58,6 +59,7 @@ Napi::Object AudioCaptureWrapper::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("setDevice", &AudioCaptureWrapper::SetDevice),
         InstanceMethod("getVolumeLevel", &AudioCaptureWrapper::GetVolumeLevel),
         InstanceMethod("getLastError", &AudioCaptureWrapper::GetLastError),
+        InstanceMethod("setNoiseGateThreshold", &AudioCaptureWrapper::SetNoiseGateThreshold),
         InstanceMethod("setAudioCallback", &AudioCaptureWrapper::SetAudioCallback),
         InstanceMethod("getBufferedAudio", &AudioCaptureWrapper::GetBufferedAudio),
         InstanceMethod("getBufferedFloat32Audio", &AudioCaptureWrapper::GetBufferedFloat32Audio),
@@ -217,6 +219,25 @@ Napi::Value AudioCaptureWrapper::GetLastError(const Napi::CallbackInfo& info) {
     
     std::string error = audioCapture_->GetLastError();
     return Napi::String::New(env, error);
+}
+
+Napi::Value AudioCaptureWrapper::SetNoiseGateThreshold(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    
+    if (info.Length() < 1 || !info[0].IsNumber()) {
+        Napi::TypeError::New(env, "Expected threshold number").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    
+    if (!audioCapture_) {
+        Napi::Error::New(env, "Audio capture not initialized").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    
+    float threshold = info[0].As<Napi::Number>().FloatValue();
+    audioCapture_->SetNoiseGateThreshold(threshold);
+    
+    return Napi::Boolean::New(env, true);
 }
 
 Napi::Value AudioCaptureWrapper::SetAudioCallback(const Napi::CallbackInfo& info) {

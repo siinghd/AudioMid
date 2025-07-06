@@ -88,6 +88,13 @@ std::string LinuxAudioCapture::GetLastError() const {
     return lastError_;
 }
 
+void LinuxAudioCapture::SetNoiseGateThreshold(float threshold) {
+    // Linux PulseAudio doesn't have a built-in noise gate like macOS ScreenCaptureKit
+    // This is a no-op for Linux - noise gating will be handled in JavaScript VAD
+    // Clear any previous errors
+    lastError_ = "";
+}
+
 void LinuxAudioCapture::CaptureThreadFunction() {
     // TODO: Implement actual capture loop using PulseAudio
     /*

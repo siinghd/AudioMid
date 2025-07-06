@@ -3,12 +3,14 @@
  * Streams audio to GPT-4o and receives both audio responses and text transcriptions
  */
 
-import WebSocket from 'ws';
 import { EventEmitter } from 'events';
+import fs from 'fs';
+import path from 'path';
+import WebSocket from 'ws';
 
 interface TurnDetectionConfig {
   type: 'server_vad' | 'semantic_vad';
-  threshold?: number;        // server_vad only
+  threshold?: number; // server_vad only
   prefix_padding_ms?: number; // server_vad only
   silence_duration_ms?: number; // server_vad only
   eagerness?: 'low' | 'medium' | 'high' | 'auto'; // semantic_vad only
@@ -54,10 +56,15 @@ export default class RealtimeConversation extends EventEmitter {
   private reconnectAttempts = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
   private readonly SESSION_REFRESH_MS = 25 * 60 * 1000; // 25 minutes
-  
+
   // Event tracking for better error diagnostics
   private pendingEvents = new Map<string, any>();
   private lastChunkBytes = 0;
+
+  // Audio debugging
+  private audioDumpEnabled = false;
+  private audioDumpFile: string | null = null;
+  private audioDumpStream: fs.WriteStream | null = null;
 
   constructor(config: RealtimeConfig) {
     super();
@@ -70,12 +77,15 @@ export default class RealtimeConversation extends EventEmitter {
     return new Promise((resolve, reject) => {
       console.log('🔌 Connecting to OpenAI Realtime API...');
 
-      this.ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${this.model}`, {
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          'OpenAI-Beta': 'realtime=v1',
+      this.ws = new WebSocket(
+        `wss://api.openai.com/v1/realtime?model=${this.model}`,
+        {
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            'OpenAI-Beta': 'realtime=v1',
+          },
         },
-      });
+      );
 
       this.ws.once('open', () => {
         console.log('✅ Connected to OpenAI Realtime API');
@@ -89,7 +99,6 @@ export default class RealtimeConversation extends EventEmitter {
       this.ws.on('message', (data: Buffer) => {
         try {
           const message = JSON.parse(data.toString()) as OpenAIMessage;
-          console.log(`📨 [Realtime WS] Received: ${message.type}`);
           this.handleMessage(message);
         } catch (error) {
           console.error('❌ Error parsing WebSocket message:', error);
@@ -106,7 +115,7 @@ export default class RealtimeConversation extends EventEmitter {
         console.error('❌ WebSocket error:', error);
         this.isConnected = false;
         this.emit('error', error);
-        
+
         // Attempt reconnection after error
         this.scheduleReconnect();
         reject(error);
@@ -128,34 +137,38 @@ export default class RealtimeConversation extends EventEmitter {
     const session: any = {
       modalities: ['audio', 'text'], // Always enable both for best experience
       voice: this.config.voice || 'alloy',
-      instructions: this.config.systemPrompt || 'You are a helpful AI assistant. Please respond naturally and concisely to what you hear.',
-      
+      instructions:
+        this.config.systemPrompt ||
+        'You are a helpful AI assistant. Please respond naturally and concisely to what you hear.',
+
+      // We send mono 24 kHz 16-bit PCM (labelled simply as pcm16)
       input_audio_format: 'pcm16',
-      
-      output_audio_format: 'pcm16'
+      output_audio_format: 'pcm16',
+
+      // Disable OpenAI's server VAD - use only WebRTC VAD
+      turn_detection: null,
     };
 
     // Add transcription if requested (optional - may fail without affecting conversation)
     if (this.config.wantTranscripts !== false) {
-      session.input_audio_transcription = { 
-        model: this.config.transcriptionModel || 'gpt-4o-transcribe' 
+      session.input_audio_transcription = {
+        model: this.config.transcriptionModel || 'gpt-4o-transcribe',
       };
       // Note: Transcription failures are non-critical and won't stop the conversation
     }
 
     const sessionConfig = {
       type: 'session.update',
-      session
+      session,
     };
 
     console.log('🔧 Initializing Realtime API session (CLIENT-DRIVEN VAD):', {
       modalities: session.modalities,
       voice: session.voice,
       audio_format: session.input_audio_format,
-      transcription: !!session.input_audio_transcription
+      transcription: !!session.input_audio_transcription,
     });
-    
-    console.log('📤 [Session Update] Sending config:', JSON.stringify(sessionConfig, null, 2));
+
     this.ws.send(JSON.stringify(sessionConfig));
   }
 
@@ -181,8 +194,12 @@ export default class RealtimeConversation extends EventEmitter {
         break;
 
       case 'conversation.item.input_audio_transcription.failed':
-        console.warn(`⚠️ Transcription failed for item ${message.item_id || 'unknown'}. Size: ${this.lastChunkBytes}B, SR: 24kHz`);
-        console.warn('   → Transcription is optional, continuing without text for this turn');
+        console.warn(
+          `⚠️ Transcription failed for item ${message.item_id || 'unknown'}. Size: ${this.lastChunkBytes}B, SR: 24kHz`,
+        );
+        console.warn(
+          '   → Transcription is optional, continuing without text for this turn',
+        );
         // Note: To retry with Whisper-1, would need to reconnect with new session
         this.emit('transcription.failed', message.error);
         break;
@@ -202,7 +219,6 @@ export default class RealtimeConversation extends EventEmitter {
       // AI response events (audio)
       case 'response.audio.delta':
         if (message.delta) {
-          console.log('🔊 AI audio delta received');
           // Convert base64 to audio buffer
           const audioBuffer = Buffer.from(message.delta, 'base64');
           this.emit('ai_audio_delta', audioBuffer);
@@ -228,26 +244,28 @@ export default class RealtimeConversation extends EventEmitter {
         console.log('   📊 Event details:', JSON.stringify(message, null, 2));
         this.emit('speech_stopped');
         break;
-        
+
       case 'input_audio_buffer.committed':
         console.log('✅ [Turn] Audio buffer committed - turn complete');
         console.log('   📊 Details:', JSON.stringify(message, null, 2));
+        this.audioBufferHasData = false; // Reset flag after successful commit
         this.emit('turn.committed');
         break;
-        
+
       case 'input_audio_buffer.cleared':
         console.log('🗑️ [Turn] Audio buffer cleared - ready for next turn');
+        this.audioBufferHasData = false; // Reset flag when buffer is cleared
         break;
-        
+
       case 'conversation.item.created':
         console.log('📝 [Turn] Conversation item created');
         console.log('   📊 Details:', JSON.stringify(message, null, 2));
         break;
-        
+
       case 'response.output_item.added':
         console.log('🤖 [Response] Output item added');
         break;
-        
+
       case 'response.content_part.added':
         console.log('🤖 [Response] Content part added');
         break;
@@ -264,22 +282,37 @@ export default class RealtimeConversation extends EventEmitter {
         break;
 
       case 'error': {
-        const { type, code, message: errorMsg, param, event_id: eventId } = message.error || {};
-        console.error('[Realtime-Error]', { type, code, param, eventId, msg: errorMsg });
-        
+        const {
+          type,
+          code,
+          message: errorMsg,
+          param,
+          event_id: eventId,
+        } = message.error || {};
+        console.error('[Realtime-Error]', {
+          type,
+          code,
+          param,
+          eventId,
+          msg: errorMsg,
+        });
+
         // Look up the originating event for context
         if (eventId) {
           const originatingEvent = this.pendingEvents.get(eventId);
           if (originatingEvent) {
-            console.error('   ↳ Caused by:', originatingEvent.type, 'sent', Date.now() - originatingEvent.sentAt, 'ms ago');
+            console.error(
+              '   ↳ Caused by:',
+              originatingEvent.type,
+              'sent',
+              Date.now() - originatingEvent.sentAt,
+              'ms ago',
+            );
             this.pendingEvents.delete(eventId);
           }
         }
-        
-        this.emit(
-          'error',
-          new Error(errorMsg || 'Unknown API error'),
-        );
+
+        this.emit('error', new Error(errorMsg || 'Unknown API error'));
         break;
       }
 
@@ -289,14 +322,14 @@ export default class RealtimeConversation extends EventEmitter {
           this.emit('ai_audio_transcript_delta', message.delta);
         }
         break;
-        
+
       case 'response.audio_transcript.done':
         if (message.transcript) {
           console.log('🤖 AI said (audio):', message.transcript);
           this.emit('ai_audio_transcript_done', message.transcript);
         }
         break;
-        
+
       case 'response.content_part.done':
       case 'response.output_item.done':
       case 'rate_limits.updated':
@@ -312,6 +345,7 @@ export default class RealtimeConversation extends EventEmitter {
 
   private audioChunksSent = 0;
   private lastAudioLogTime = 0;
+  private audioBufferHasData = false;
 
   pushPCM(int16Array: Int16Array): boolean {
     if (!this.ws || !this.isConnected) {
@@ -325,6 +359,12 @@ export default class RealtimeConversation extends EventEmitter {
         int16Array.byteOffset,
         int16Array.byteLength,
       );
+
+      // Dump audio to file if enabled
+      if (this.audioDumpEnabled && this.audioDumpStream) {
+        this.audioDumpStream.write(buffer);
+      }
+
       const base64Audio = buffer.toString('base64');
 
       const audioMessage = {
@@ -333,19 +373,14 @@ export default class RealtimeConversation extends EventEmitter {
       };
 
       const success = this.send(audioMessage);
-      
+
       if (success) {
         this.audioChunksSent += 1;
         this.lastChunkBytes = int16Array.byteLength; // Track for error diagnostics
-        
-        // Log every 100 chunks (approximately every 4 seconds at 40ms chunks)
-        const now = Date.now();
-        if (this.audioChunksSent % 100 === 0 || now - this.lastAudioLogTime > 5000) {
-          console.log(`📤 [Audio] Sent chunk #${this.audioChunksSent} (${int16Array.length} samples, ${int16Array.byteLength} bytes)`);
-          this.lastAudioLogTime = now;
-        }
+        this.audioBufferHasData = true; // Mark that we have audio in the buffer
+
       }
-      
+
       return success;
     } catch (error) {
       console.error('❌ Error sending audio:', error);
@@ -371,16 +406,18 @@ export default class RealtimeConversation extends EventEmitter {
       if (!message.event_id) {
         message.event_id = crypto.randomUUID();
       }
-      
+
       // Track important events for error diagnostics
-      if (['response.create', 'input_audio_buffer.commit'].includes(message.type)) {
+      if (
+        ['response.create', 'input_audio_buffer.commit'].includes(message.type)
+      ) {
         this.pendingEvents.set(message.event_id, {
           type: message.type,
           sentAt: Date.now(),
-          details: { ...message }
+          details: { ...message },
         });
       }
-      
+
       this.ws.send(JSON.stringify(message));
       return true;
     } catch (error) {
@@ -397,21 +434,29 @@ export default class RealtimeConversation extends EventEmitter {
     if (!this.ws || !this.isConnected) return;
 
     console.log('🛑 [Turn Management] Closing turn (client-driven)');
-    
-    // 1. Commit the input audio buffer
-    this.send({ type: 'input_audio_buffer.commit' });
-    console.log('   ✓ Committed audio buffer');
-    
-    // 2. Request a response with both modalities
-    this.send({ 
-      type: 'response.create',
-      response: { 
-        modalities: ['audio', 'text'],
-        instructions: undefined // Use session instructions
-      }
-    });
-    console.log('   ✓ Requested AI response');
-    
+
+    // Only commit if we have audio in the buffer
+    if (this.audioBufferHasData) {
+      // 1. Commit the input audio buffer
+      this.send({ type: 'input_audio_buffer.commit' });
+      console.log('   ✓ Committed audio buffer');
+
+      // 2. Request a response with both modalities
+      this.send({
+        type: 'response.create',
+        response: {
+          modalities: ['audio', 'text'],
+          instructions: undefined, // Use session instructions
+        },
+      });
+      console.log('   ✓ Requested AI response');
+
+      // Reset the flag
+      this.audioBufferHasData = false;
+    } else {
+      console.log('   ⚠️ Skipping turn close - no audio in buffer');
+    }
+
     // 3. Clear the buffer for next turn
     this.send({ type: 'input_audio_buffer.clear' });
     console.log('   ✓ Cleared audio buffer');
@@ -434,7 +479,9 @@ export default class RealtimeConversation extends EventEmitter {
 
   isReady(): boolean {
     return (
-      this.isConnected && this.ws !== null && this.ws.readyState === WebSocket.OPEN
+      this.isConnected &&
+      this.ws !== null &&
+      this.ws.readyState === WebSocket.OPEN
     );
   }
 
@@ -447,11 +494,13 @@ export default class RealtimeConversation extends EventEmitter {
     }
 
     this.reconnectAttempts += 1;
-    const delay = Math.min(1000 * (2 ** (this.reconnectAttempts - 1)), 10000); // Exponential backoff
+    const delay = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 10000); // Exponential backoff
     const jitter = Math.random() * 400 + 200; // 200-600ms jitter
-    
-    console.log(`🔄 Scheduling reconnection attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS} in ${delay + jitter}ms`);
-    
+
+    console.log(
+      `🔄 Scheduling reconnection attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS} in ${delay + jitter}ms`,
+    );
+
     setTimeout(() => {
       this.reconnect();
     }, delay + jitter);
@@ -460,7 +509,7 @@ export default class RealtimeConversation extends EventEmitter {
   async reconnect(): Promise<void> {
     console.log('🔄 Attempting to reconnect...');
     this.disconnect();
-    
+
     try {
       await this.connect();
       console.log('✅ Reconnection successful');
@@ -474,7 +523,7 @@ export default class RealtimeConversation extends EventEmitter {
   // Check if session needs refresh (called periodically)
   checkSessionAge(): boolean {
     if (!this.isConnected || this.sessionStartTime === 0) return false;
-    
+
     const age = Date.now() - this.sessionStartTime;
     if (age > this.SESSION_REFRESH_MS) {
       console.log('⏰ Session approaching 30-minute limit, refreshing...');
@@ -488,16 +537,53 @@ export default class RealtimeConversation extends EventEmitter {
   cleanupPendingEvents(): void {
     const now = Date.now();
     this.pendingEvents.forEach((event, eventId) => {
-      if (now - event.sentAt > 60_000) { // 1 minute old
+      if (now - event.sentAt > 60_000) {
+        // 1 minute old
         this.pendingEvents.delete(eventId);
       }
     });
   }
 
   // Reconnect with different transcription model (if needed)
-  async reconnectWithTranscriptionModel(model: 'gpt-4o-transcribe' | 'whisper-1'): Promise<void> {
+  async reconnectWithTranscriptionModel(
+    model: 'gpt-4o-transcribe' | 'whisper-1',
+  ): Promise<void> {
     console.log(`🔄 Reconnecting with ${model} transcription model...`);
     this.config.transcriptionModel = model;
     await this.reconnect();
+  }
+
+  // Audio debugging methods
+  enableAudioDump(outputPath?: string): void {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    this.audioDumpFile =
+      outputPath || path.join(process.cwd(), `audio-dump-${timestamp}.pcm`);
+
+    try {
+      this.audioDumpStream = fs.createWriteStream(this.audioDumpFile);
+      this.audioDumpEnabled = true;
+      console.log(`🎵 Audio dump enabled: ${this.audioDumpFile}`);
+      console.log(
+        `   To play: ffplay -f s16le -ar 24000 -ac 1 "${this.audioDumpFile}"`,
+      );
+    } catch (error) {
+      console.error('❌ Failed to enable audio dump:', error);
+    }
+  }
+
+  disableAudioDump(): void {
+    if (this.audioDumpStream) {
+      this.audioDumpStream.end();
+      this.audioDumpStream = null;
+    }
+    this.audioDumpEnabled = false;
+
+    if (this.audioDumpFile) {
+      console.log(`🎵 Audio dump saved: ${this.audioDumpFile}`);
+      console.log(
+        `   To play: ffplay -f s16le -ar 24000 -ac 1 "${this.audioDumpFile}"`,
+      );
+      this.audioDumpFile = null;
+    }
   }
 }

@@ -66,7 +66,6 @@ export async function initializeResampler(): Promise<void> {
  * Used as fallback when high-quality resampler is not available
  */
 function resample48to24Simple(f48: Float32Array): Float32Array {
-  // console.warn('🔽 Using simple resampling (consider initializing high-quality resampler)');
   
   const outputLength = Math.floor(f48.length / 2);
   const f24 = new Float32Array(outputLength);

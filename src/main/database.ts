@@ -6,6 +6,8 @@ import crypto from 'crypto';
 export interface AppSettings {
   id?: number;
   openaiApiKey?: string;
+  geminiApiKey?: string;
+  aiProvider: 'openai' | 'gemini';
   systemPrompt?: string;
   windowOpacity: number;
   alwaysOnTop: boolean;
@@ -17,6 +19,29 @@ export interface AppSettings {
   theme: 'dark' | 'light';
   autoStart: boolean;
   showInTray: boolean;
+  vadSettings?: {
+    releaseMs: number;
+    holdMs: number;
+    threshold: number;
+    adaptiveNoiseFloor: boolean;
+  };
+  audioSettings?: {
+    bufferSizeMs: number;
+    enableVAD: boolean;
+  };
+  geminiSettings?: {
+    model: 'gemini-2.5-flash-preview-native-audio-dialog' | 'gemini-live-2.5-flash-preview' | 'gemini-2.0-flash-live-001';
+    audioArchitecture: 'native' | 'half-cascade';
+    responseModalities: string[];
+  };
+  debugSettings?: {
+    dumpNativeAudio: boolean;
+    dumpOpenAIRawAudio: boolean;
+    dumpOpenAIApiAudio: boolean;
+  };
+  transcriptSettings?: {
+    enabled: boolean;
+  };
   lastUpdated: string;
 }
 
@@ -123,6 +148,69 @@ class DatabaseManager {
       console.log('📝 systemPrompt column already exists in settings table');
     }
 
+    // Migration: Add VAD settings column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE settings ADD COLUMN vadSettings TEXT`);
+      console.log('✅ Added vadSettings column to settings table');
+    } catch {
+      // Column already exists, which is fine
+      console.log('📝 vadSettings column already exists in settings table');
+    }
+
+    // Migration: Add audio settings column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE settings ADD COLUMN audioSettings TEXT`);
+      console.log('✅ Added audioSettings column to settings table');
+    } catch {
+      // Column already exists, which is fine
+      console.log('📝 audioSettings column already exists in settings table');
+    }
+
+    // Migration: Add Gemini API key column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE settings ADD COLUMN geminiApiKey TEXT`);
+      console.log('✅ Added geminiApiKey column to settings table');
+    } catch {
+      // Column already exists, which is fine
+      console.log('📝 geminiApiKey column already exists in settings table');
+    }
+
+    // Migration: Add AI provider column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE settings ADD COLUMN aiProvider TEXT DEFAULT 'openai'`);
+      console.log('✅ Added aiProvider column to settings table');
+    } catch {
+      // Column already exists, which is fine
+      console.log('📝 aiProvider column already exists in settings table');
+    }
+
+    // Migration: Add Gemini settings column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE settings ADD COLUMN geminiSettings TEXT`);
+      console.log('✅ Added geminiSettings column to settings table');
+    } catch {
+      // Column already exists, which is fine
+      console.log('📝 geminiSettings column already exists in settings table');
+    }
+
+    // Migration: Add debug settings column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE settings ADD COLUMN debugSettings TEXT`);
+      console.log('✅ Added debugSettings column to settings table');
+    } catch {
+      // Column already exists, which is fine
+      console.log('📝 debugSettings column already exists in settings table');
+    }
+
+    // Migration: Add transcript settings column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE settings ADD COLUMN transcriptSettings TEXT`);
+      console.log('✅ Added transcriptSettings column to settings table');
+    } catch {
+      // Column already exists, which is fine
+      console.log('📝 transcriptSettings column already exists in settings table');
+    }
+
     // Conversations table
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS conversations (
@@ -161,10 +249,35 @@ class DatabaseManager {
     return {
       ...row,
       openaiApiKey: row.openaiApiKey ? this.decrypt(row.openaiApiKey) : undefined,
+      geminiApiKey: row.geminiApiKey ? this.decrypt(row.geminiApiKey) : undefined,
+      aiProvider: row.aiProvider || 'openai',
       alwaysOnTop: Boolean(row.alwaysOnTop),
       invisibleToRecording: Boolean(row.invisibleToRecording),
       autoStart: Boolean(row.autoStart),
-      showInTray: Boolean(row.showInTray)
+      showInTray: Boolean(row.showInTray),
+      vadSettings: row.vadSettings ? JSON.parse(row.vadSettings) : {
+        releaseMs: 2000,
+        holdMs: 200,
+        threshold: 0.02,
+        adaptiveNoiseFloor: true,
+      },
+      audioSettings: row.audioSettings ? JSON.parse(row.audioSettings) : {
+        bufferSizeMs: 1000,
+        enableVAD: true,
+      },
+      geminiSettings: row.geminiSettings ? JSON.parse(row.geminiSettings) : {
+        model: 'gemini-2.5-flash-preview-native-audio-dialog',
+        audioArchitecture: 'native',
+        responseModalities: ['AUDIO'],
+      },
+      debugSettings: row.debugSettings ? JSON.parse(row.debugSettings) : {
+        dumpNativeAudio: false,
+        dumpOpenAIRawAudio: false,
+        dumpOpenAIApiAudio: false,
+      },
+      transcriptSettings: row.transcriptSettings ? JSON.parse(row.transcriptSettings) : {
+        enabled: false,
+      }
     };
   }
 
@@ -172,18 +285,21 @@ class DatabaseManager {
     const currentSettings = this.getSettings() || {} as AppSettings;
     const updatedSettings = { ...currentSettings, ...settings, lastUpdated: new Date().toISOString() };
 
-    // Encrypt API key if provided
-    const apiKeyToStore = updatedSettings.openaiApiKey ? this.encrypt(updatedSettings.openaiApiKey) : null;
+    // Encrypt API keys if provided
+    const openaiApiKeyToStore = updatedSettings.openaiApiKey ? this.encrypt(updatedSettings.openaiApiKey) : null;
+    const geminiApiKeyToStore = updatedSettings.geminiApiKey ? this.encrypt(updatedSettings.geminiApiKey) : null;
 
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO settings (
-        id, openaiApiKey, systemPrompt, windowOpacity, alwaysOnTop, invisibleToRecording,
-        windowWidth, windowHeight, windowX, windowY, theme, autoStart, showInTray, lastUpdated
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, openaiApiKey, geminiApiKey, aiProvider, systemPrompt, windowOpacity, alwaysOnTop, invisibleToRecording,
+        windowWidth, windowHeight, windowX, windowY, theme, autoStart, showInTray, vadSettings, audioSettings, geminiSettings, lastUpdated
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
-      apiKeyToStore,
+      openaiApiKeyToStore,
+      geminiApiKeyToStore,
+      updatedSettings.aiProvider || 'openai',
       updatedSettings.systemPrompt,
       updatedSettings.windowOpacity,
       updatedSettings.alwaysOnTop ? 1 : 0,
@@ -195,6 +311,9 @@ class DatabaseManager {
       updatedSettings.theme,
       updatedSettings.autoStart ? 1 : 0,
       updatedSettings.showInTray ? 1 : 0,
+      updatedSettings.vadSettings ? JSON.stringify(updatedSettings.vadSettings) : null,
+      updatedSettings.audioSettings ? JSON.stringify(updatedSettings.audioSettings) : null,
+      updatedSettings.geminiSettings ? JSON.stringify(updatedSettings.geminiSettings) : null,
       updatedSettings.lastUpdated
     );
   }

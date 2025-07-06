@@ -29,6 +29,7 @@ public:
     bool SetDevice(const std::string& deviceId) override;
     float GetVolumeLevel() const override;
     std::string GetLastError() const override;
+    void SetNoiseGateThreshold(float threshold) override;
 
 private:
     // COM interfaces
