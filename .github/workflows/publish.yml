@@ -37,7 +37,7 @@ jobs:
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             sudo apt-get update
-            sudo apt-get install -y build-essential cmake libpulse-dev
+            sudo apt-get install -y build-essential cmake libpulse-dev libx11-dev
           elif [[ "${{ runner.os }}" == "Windows" ]]; then
             choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
           fi

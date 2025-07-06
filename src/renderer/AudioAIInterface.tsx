@@ -65,44 +65,71 @@ function AudioAIInterface(): React.ReactElement {
     const width = canvas.width;
     const height = canvas.height;
     const centerY = height / 2;
-    const barCount = 64;
-    const barWidth = 2;
-    const barSpacing = width / barCount;
+    const points = 120;
+    const stepX = width / points;
+    const time = Date.now() / 1000;
 
-    // Clear canvas
-    ctx.fillStyle = isDark ? 'rgba(0, 0, 0, 0.1)' : 'rgba(255, 255, 255, 0.1)';
+    // Clear canvas with subtle background
+    ctx.fillStyle = isDark ? 'rgba(0, 0, 0, 0.05)' : 'rgba(255, 255, 255, 0.05)';
     ctx.fillRect(0, 0, width, height);
 
-    const baseColor = isDark ? 'rgba(255, 255, 255' : 'rgba(0, 0, 0';
+    // Set up gradient for the waveform
+    const gradient = ctx.createLinearGradient(0, 0, width, 0);
+    if (isDark) {
+      gradient.addColorStop(0, 'rgba(255, 255, 255, 0.1)');
+      gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.8)');
+      gradient.addColorStop(1, 'rgba(255, 255, 255, 0.1)');
+    } else {
+      gradient.addColorStop(0, 'rgba(0, 0, 0, 0.1)');
+      gradient.addColorStop(0.5, 'rgba(0, 0, 0, 0.8)');
+      gradient.addColorStop(1, 'rgba(0, 0, 0, 0.1)');
+    }
 
-    for (let i = 0; i < barCount; i++) {
-      let barHeight;
-      const time = Date.now() / 1000;
+    // Draw single continuous waveform line
+    ctx.beginPath();
+    ctx.strokeStyle = gradient;
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (let i = 0; i < points; i++) {
+      const x = i * stepX;
+      let amplitude;
 
       if (isRecording && frequencyData.length > 0) {
-        const dataIndex = Math.floor((i / barCount) * frequencyData.length);
-        const amplitude = frequencyData[dataIndex] || 0;
-        const logAmplitude = Math.log10(1 + amplitude * 9) / Math.log10(10);
-        const waveOffset = Math.sin(time * 2 + i * 0.1) * 0.05;
-        barHeight = Math.max(1, (logAmplitude + waveOffset) * height * 0.7);
+        // Use real frequency data when recording
+        const dataIndex = Math.floor((i / points) * frequencyData.length);
+        const rawAmplitude = frequencyData[dataIndex] || 0;
+        const logAmplitude = Math.log10(1 + rawAmplitude * 9) / Math.log10(10);
+        const waveOffset = Math.sin(time * 2 + i * 0.05) * 0.1;
+        amplitude = (logAmplitude + waveOffset) * height * 0.4;
       } else if (isRecording && audioLevel > 0) {
-        const wave = Math.sin(time * 3 + i * 0.2) * 0.3 + 0.5;
-        barHeight = audioLevel * height * 0.4 * wave;
+        // Use audio level when recording but no frequency data
+        const wave = Math.sin(time * 4 + i * 0.08) * 0.5 + 0.5;
+        amplitude = audioLevel * height * 0.3 * wave;
       } else {
-        const idleWave = Math.sin(time + i * 0.1) * 0.1 + 0.1;
-        barHeight = height * idleWave * 0.05;
+        // Subtle idle animation
+        const idleWave = Math.sin(time * 0.5 + i * 0.02) * 0.05 + 0.05;
+        amplitude = height * idleWave;
       }
 
-      const x = i * barSpacing + (barSpacing - barWidth) / 2;
+      const y = centerY + Math.sin(time * 3 + i * 0.1) * amplitude;
 
-      // Draw bars with opacity based on height
-      const opacity = isRecording ? 0.3 + (barHeight / height) * 0.7 : 0.2;
-      ctx.fillStyle = `${baseColor}, ${opacity})`;
+      if (i === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
 
-      // Draw top bar
-      ctx.fillRect(x, centerY - barHeight / 2, barWidth, barHeight / 2);
-      // Draw bottom bar (mirror)
-      ctx.fillRect(x, centerY, barWidth, barHeight / 2);
+    ctx.stroke();
+
+    // Add glow effect when recording
+    if (isRecording) {
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = isDark ? 'rgba(255, 255, 255, 0.3)' : 'rgba(0, 0, 0, 0.3)';
+      ctx.stroke();
+      ctx.shadowBlur = 0;
     }
 
     animationRef.current = requestAnimationFrame(animateWaveform);
@@ -477,7 +504,7 @@ function AudioAIInterface(): React.ReactElement {
 
       {/* Main Content */}
       <div
-        className={`h-[calc(100vh-3.5rem)] flex ${transcriptEnabled ? 'divide-x' : ''} ${isDark ? 'divide-audiomind-gray-900' : 'divide-audiomind-gray-200'}`}
+        className={`h-[calc(100vh-3.5rem-7rem)] flex ${transcriptEnabled ? 'divide-x' : ''} ${isDark ? 'divide-audiomind-gray-900' : 'divide-audiomind-gray-200'}`}
       >
         {/* Transcript Panel - Only show if enabled */}
         {transcriptEnabled && (
@@ -516,57 +543,6 @@ function AudioAIInterface(): React.ReactElement {
                   {isRecording ? 'Listening...' : 'Click record to start'}
                 </p>
               )}
-            </div>
-
-            {/* Audio Waveform */}
-            <div
-              className={`border-t ${isDark ? 'border-audiomind-gray-900' : 'border-audiomind-gray-200'} p-4 flex-shrink-0`}
-            >
-              <canvas
-                ref={canvasRef}
-                className="w-full h-20"
-                style={{ width: '100%', height: '80px' }}
-              />
-            </div>
-
-            {/* Controls */}
-            <div
-              className={`border-t ${isDark ? 'border-audiomind-gray-900' : 'border-audiomind-gray-200'} p-4 flex-shrink-0`}
-            >
-              <div className="flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={toggleRecording}
-                  className={`px-6 py-2 rounded-full font-medium transition-all ${
-                    isRecording
-                      ? isDark
-                        ? 'bg-audiomind-white text-audiomind-black hover:bg-audiomind-gray-100'
-                        : 'bg-audiomind-black text-audiomind-white hover:bg-audiomind-gray-900'
-                      : isDark
-                        ? 'bg-audiomind-gray-900 text-audiomind-gray-300 hover:bg-audiomind-gray-800 hover:text-audiomind-white'
-                        : 'bg-audiomind-gray-100 text-audiomind-gray-700 hover:bg-audiomind-gray-200 hover:text-audiomind-black'
-                  }`}
-                >
-                  {isRecording ? 'Stop' : 'Record'}
-                </button>
-
-                {(currentTranscript || partialTranscript) && (
-                  <button
-                    type="button"
-                    onClick={sendMessage}
-                    disabled={isProcessing}
-                    className={`px-6 py-2 rounded-full font-medium transition-all ${
-                      isProcessing
-                        ? 'opacity-50 cursor-not-allowed'
-                        : isDark
-                          ? 'bg-audiomind-gray-900 text-audiomind-gray-300 hover:bg-audiomind-gray-800 hover:text-audiomind-white'
-                          : 'bg-audiomind-gray-100 text-audiomind-gray-700 hover:bg-audiomind-gray-200 hover:text-audiomind-black'
-                    }`}
-                  >
-                    Send
-                  </button>
-                )}
-              </div>
             </div>
           </div>
         )}
@@ -674,10 +650,68 @@ function AudioAIInterface(): React.ReactElement {
         </div>
       </div>
 
+      {/* Always visible Audio Controls */}
+      <div
+        className={`fixed bottom-0 left-0 right-0 border-t ${isDark ? 'border-audiomind-gray-900 bg-audiomind-black' : 'border-audiomind-gray-200 bg-audiomind-white'} backdrop-blur-sm bg-opacity-95`}
+      >
+        {/* Modern Single-Line Waveform */}
+        <div className="px-6 py-3">
+          <canvas
+            ref={canvasRef}
+            className="w-full h-8"
+            style={{ width: '100%', height: '32px' }}
+          />
+        </div>
+
+        {/* Controls */}
+        <div className="px-6 pb-4 flex items-center justify-center space-x-4">
+          <button
+            type="button"
+            onClick={toggleRecording}
+            className={`flex items-center justify-center w-12 h-12 rounded-full font-medium transition-all ${
+              isRecording
+                ? isDark
+                  ? 'bg-red-500 text-white hover:bg-red-600 shadow-lg'
+                  : 'bg-red-500 text-white hover:bg-red-600 shadow-lg'
+                : isDark
+                  ? 'bg-audiomind-gray-900 text-audiomind-gray-300 hover:bg-audiomind-gray-800 hover:text-audiomind-white border border-audiomind-gray-800'
+                  : 'bg-audiomind-gray-100 text-audiomind-gray-700 hover:bg-audiomind-gray-200 hover:text-audiomind-black border border-audiomind-gray-200'
+            }`}
+          >
+            {isRecording ? (
+              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            ) : (
+              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="8" />
+              </svg>
+            )}
+          </button>
+
+          {transcriptEnabled && (currentTranscript || partialTranscript) && (
+            <button
+              type="button"
+              onClick={sendMessage}
+              disabled={isProcessing}
+              className={`px-6 py-2 rounded-full font-medium transition-all ${
+                isProcessing
+                  ? 'opacity-50 cursor-not-allowed'
+                  : isDark
+                    ? 'bg-audiomind-gray-900 text-audiomind-gray-300 hover:bg-audiomind-gray-800 hover:text-audiomind-white'
+                    : 'bg-audiomind-gray-100 text-audiomind-gray-700 hover:bg-audiomind-gray-200 hover:text-audiomind-black'
+              }`}
+            >
+              Send
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Error Toast */}
       {pipelineError && (
         <div
-          className={`fixed bottom-4 right-4 p-4 rounded-lg shadow-lg animate-slide-up ${
+          className={`fixed bottom-28 right-4 p-4 rounded-lg shadow-lg animate-slide-up ${
             isDark
               ? 'bg-audiomind-gray-900 text-audiomind-gray-200'
               : 'bg-audiomind-gray-100 text-audiomind-gray-800'
