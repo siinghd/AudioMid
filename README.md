@@ -42,6 +42,8 @@ yarn install
 yarn dev   # starts Electron and React in watch mode
 ```
 
+The native C++ module for audio capture is compiled automatically during the `yarn install` step. If you need to rebuild it manually, run `yarn build:native`.
+
 ### Package binaries
 
 ```bash
