@@ -9,6 +9,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-14, windows-latest, ubuntu-latest]
 
@@ -38,6 +39,7 @@ jobs:
 
       # Build platform-specific artefacts
       - name: Build application
+        shell: bash
         run: |
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             yarn package --mac --publish never
