@@ -59,6 +59,8 @@ jobs:
         run: |
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             yarn package --mac --publish never
+            # Ad-hoc sign the app to prevent "damaged" warnings
+            find release/build/mac -name "*.app" -exec codesign --force --deep --sign - {} \;
           elif [[ "${{ runner.os }}" == "Windows" ]]; then
             yarn package --win --publish never
           else

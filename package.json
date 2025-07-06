@@ -1,6 +1,6 @@
 {
   "name": "audiomid",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "packageManager": "yarn@1.22.19",
   "description": "Minimalist AI audio assistant that captures system audio with real-time processing",
   "keywords": [
