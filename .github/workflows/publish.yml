@@ -37,6 +37,10 @@ jobs:
           corepack enable
           yarn install --frozen-lockfile
 
+      # Build native modules
+      - name: Build native modules
+        run: yarn build:native
+
       # Build platform-specific artefacts
       - name: Build application
         shell: bash
@@ -88,6 +92,13 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          files: dist/**/!(*.blockmap)
+          files: |
+            dist/**/*.dmg
+            dist/**/*.exe
+            dist/**/*.AppImage
+            dist/**/*.deb
+            dist/**/*.rpm
+            dist/**/*.zip
+            dist/**/latest*.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
