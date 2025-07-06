@@ -26,9 +26,6 @@ jobs:
           corepack enable
           yarn install --frozen-lockfile
 
-      - name: Build native modules
-        run: yarn build:native
-
       # Build platform-specific artefacts
       - name: Build application
         run: |
