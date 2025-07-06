@@ -265,8 +265,8 @@
       "onFail": "error"
     },
     "packageManager": {
-      "name": "npm",
-      "version": "7.0.0",
+      "name": "yarn",
+      "version": "1.22.19",
       "onFail": "error"
     }
   },
